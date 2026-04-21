@@ -2,30 +2,33 @@
 
 # Redex
 
-Use Codex from your phone without giving up your desktop session.
+Continue the same live Codex session from your phone.
 
+Redex is a small hobby project that gives Codex a phone-friendly web UI. I wanted a way to step away from my desk without abandoning the thread I was already in, so I built this.
 
-
-
-Redex is a lightweight web companion for Codex. It lets you open your chats in a phone-friendly UI, keep reading while you are away from your desk, and send real prompts back into the same live session.
+It is a little scrappy, but it works well enough that I keep using it. Open a session on your phone, read the transcript, send a new prompt, and keep moving. When Redex is paired with the Redex-compatible Codex fork, both Redex and the Codex desktop app attach to the same live runtime.
 
 The goal is simple:
 
 - keep Codex as the source of truth
-- make remote access feel natural
-- avoid hooky automation and fake chat relays
+- make Codex feel portable
+- avoid hooky automation, fake chat relays, and copied threads
 
 ## Why Redex
 
-If you already like working in Codex on your computer, Redex gives you a second screen for the same work:
+Most remote-control tools for Codex focus on starting a fresh session somewhere else.
+
+Redex is for a different feeling: you are already in a Codex chat on your computer, then you leave your desk and want that exact chat in your pocket.
+
+If you already like working in Codex on your desktop, Redex gives you a second screen for the same work:
 
 - pick up a live Codex session from your phone
 - watch turns arrive in near real time
 - reply into the same thread, not a copy
 - browse all your sessions in one place
-- expose it safely over your tailnet
+- expose it safely over your tailnet or local network
 
-Redex is not trying to replace Codex. It is trying to make Codex feel portable.
+Redex is not trying to replace Codex, and it is definitely not a serious platform thing. It is just a useful sidecar that makes Codex feel more portable.
 
 ## What It Looks Like
 
@@ -33,14 +36,18 @@ https://github.com/user-attachments/assets/469d8106-c67e-4e27-bac4-27c287bb471c
 
 ## Recommended Setup
 
-For the best experience, use Redex with the Redex-compatible Codex fork:
+If you want the nicest experience, use Redex with the Redex-compatible Codex fork:
 
 - Codex fork: [ladnir/codex `redex` branch](https://github.com/ladnir/codex/tree/redex)
 - Redex: [ladnir/redex](https://github.com/ladnir/redex)
 
-That setup gives you the important thing Redex wants most: both the Codex desktop app and Redex talking to the same live runtime.
+That setup unlocks the main thing Redex cares about:
 
-If you are not using the fork, Redex can still connect to a standalone Codex app-server over websocket, but that is the less integrated fallback.
+- the Codex desktop app and Redex talking to the same live runtime
+- desktop and phone seeing the same session in real time
+- prompts sent from Redex showing up in the same thread, not a separate process
+
+If you are not using the fork, Redex can still connect to a standalone Codex app-server over websocket. That works, but it feels more like remote control than a shared session.
 
 ## Quick Start
 
