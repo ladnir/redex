@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import queue
+import subprocess
 import threading
 import time
 from collections import deque
@@ -19,13 +20,15 @@ from .app_server import CodexAppServerClient
 from .app_server import CodexAppServerError
 from .app_server import CodexAppServerUnavailable
 from .app_server import _is_pre_first_turn_error
-from .app_server import make_session_detail_payload
+from .app_server import make_session_detail_page_payload
 from .app_server import make_session_list_payload
 from .app_server import normalize_thread
 
 
 EVENT_BACKLOG_LIMIT = 500
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+DEFAULT_TURN_PAGE_LIMIT = 40
+MAX_TURN_PAGE_LIMIT = 100
 
 
 INDEX_HTML = """<!doctype html>
@@ -206,6 +209,18 @@ INDEX_HTML = """<!doctype html>
       background: rgba(57, 81, 108, 0.88);
       color: var(--ink);
       box-shadow: none;
+    }
+    .icon-button {
+      width: 2rem;
+      height: 2rem;
+      min-width: 2rem;
+      padding: 0;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.96rem;
+      line-height: 1;
     }
     button:disabled {
       opacity: 0.55;
@@ -475,6 +490,11 @@ INDEX_HTML = """<!doctype html>
       min-width: 0;
       padding-bottom: 0.4rem;
     }
+    .history-loader {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 0.1rem;
+    }
     .bubble {
       padding: 0.58rem 0.74rem;
       border-radius: 0.9rem;
@@ -622,6 +642,109 @@ INDEX_HTML = """<!doctype html>
       text-decoration-thickness: 0.08em;
       text-underline-offset: 0.14em;
       word-break: break-word;
+    }
+    .directive-list {
+      display: grid;
+      gap: 0.42rem;
+      margin-top: 0.48rem;
+    }
+    .directive-card {
+      display: grid;
+      gap: 0.24rem;
+      padding: 0.62rem 0.74rem;
+      border-radius: 0.78rem;
+      border: 1px solid rgba(170, 205, 238, 0.16);
+      background: rgba(24, 38, 56, 0.82);
+    }
+    .directive-name {
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.82rem;
+      color: #f8fbff;
+    }
+    .directive-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.34rem;
+    }
+    .directive-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.28rem;
+      padding: 0.18rem 0.42rem;
+      border-radius: 999px;
+      border: 1px solid rgba(170, 205, 238, 0.14);
+      background: rgba(49, 74, 102, 0.7);
+      color: rgba(235, 244, 255, 0.92);
+      font-size: 0.74rem;
+      min-width: 0;
+    }
+    .directive-chip-key {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.68rem;
+    }
+    .directive-chip-value {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .directive-preview {
+      display: grid;
+      gap: 0.42rem;
+      margin-top: 0.1rem;
+    }
+    .directive-preview-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.34rem;
+    }
+    .directive-file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.18rem 0.44rem;
+      border-radius: 999px;
+      border: 1px solid rgba(170, 205, 238, 0.14);
+      background: rgba(57, 81, 108, 0.62);
+      font-size: 0.75rem;
+      min-width: 0;
+    }
+    .directive-file-path {
+      color: #f8fbff;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .directive-file-delta {
+      color: var(--muted);
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.72rem;
+      white-space: nowrap;
+    }
+    .directive-preview-details {
+      margin-top: 0.08rem;
+    }
+    .directive-preview-details summary {
+      cursor: pointer;
+      color: var(--tint-strong);
+      font-size: 0.78rem;
+      user-select: none;
+    }
+    .directive-preview-pre {
+      margin: 0.46rem 0 0;
+      padding: 0.7rem 0.8rem;
+      border-radius: 0.8rem;
+      background: rgba(15, 24, 36, 0.92);
+      color: #f8fbff;
+      overflow: auto;
+      border: 1px solid rgba(196, 220, 242, 0.14);
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.81rem;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    .directive-preview-note {
+      color: var(--muted);
+      font-size: 0.74rem;
     }
     .markdown code {
       font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -786,7 +909,7 @@ INDEX_HTML = """<!doctype html>
             <h2>Sessions</h2>
             <p>Attach to an active Codex thread.</p>
           </div>
-          <button id="refreshButton" class="secondary" type="button">Refresh</button>
+          <button id="refreshButton" class="secondary icon-button" type="button" aria-label="Refresh sessions" title="Refresh sessions">↻</button>
         </div>
         <input id="searchInput" class="search" type="search" placeholder="Search titles, prompts, or ids">
         <div id="sessionList" class="session-list"></div>
@@ -799,7 +922,7 @@ INDEX_HTML = """<!doctype html>
           </div>
           <div style="display:flex; gap:0.5rem; align-items:center;">
             <span id="streamBadge" class="live-pill syncing">Syncing</span>
-            <button id="reloadSessionButton" class="secondary" type="button" disabled>Reload</button>
+            <button id="reloadSessionButton" class="secondary icon-button" type="button" disabled aria-label="Reload thread" title="Reload thread">↻</button>
           </div>
         </div>
         <div id="sessionMeta" class="detail-strip"></div>
@@ -835,6 +958,11 @@ INDEX_HTML = """<!doctype html>
       lastRenderedSessionId: null,
       lastRenderedMetaKey: null,
       lastRenderedConversationKey: null,
+      activeSessionRequestNonce: 0,
+      sessionListRequestNonce: 0,
+      activeSessionDetail: null,
+      loadingOlderHistory: false,
+      recentTurnsLimit: 40,
       defaultCwd: "__DEFAULT_CWD__",
       searchQuery: "",
       expandedGroups: {},
@@ -865,7 +993,9 @@ INDEX_HTML = """<!doctype html>
       return String(value ?? "")
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;");
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
     }
 
     function basename(path) {
@@ -1012,11 +1142,19 @@ INDEX_HTML = """<!doctype html>
           return `@@REDX_SLOT_${index}@@`;
         });
       };
+      const renderLink = (label, href) => {
+        const rawHref = String(href || "").trim();
+        const lowerHref = rawHref.toLowerCase();
+        if (!rawHref || lowerHref.startsWith("javascript:") || lowerHref.startsWith("data:") || lowerHref.startsWith("vbscript:")) {
+          return escapeHtml(label);
+        }
+        const external = /^[a-z][a-z0-9+.-]*:\\/\\//i.test(rawHref);
+        const attrs = external ? ' target="_blank" rel="noreferrer"' : "";
+        return `<a href="${escapeHtml(rawHref)}"${attrs}>${escapeHtml(label)}</a>`;
+      };
 
       stash(/`([^`\\n]+)`/g, (_, code) => `<code>${escapeHtml(code)}</code>`);
-      stash(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, (_, label, href) => (
-        `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
-      ));
+      stash(/\\[([^\\]]+)\\]\\(([^\\s)]+)\\)/g, (_, label, href) => renderLink(label, href));
       stash(/(^|[\\s(])(https?:\\/\\/[^\\s<)]+)/g, (_, prefix, href) => (
         `${prefix}<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(href)}</a>`
       ));
@@ -1025,6 +1163,89 @@ INDEX_HTML = """<!doctype html>
 
       working = escapeHtml(working).replace(/\\n/g, "<br>");
       return working.replace(/@@REDX_SLOT_(\\d+)@@/g, (_, index) => slots[Number(index)] || "");
+    }
+
+    function parseDirective(line) {
+      const match = String(line || "").trim().match(/^::([a-z0-9-]+)\\{(.*)\\}$/i);
+      if (!match) {
+        return null;
+      }
+      const [, name, body] = match;
+      const attrs = [];
+      const attrPattern = /([a-zA-Z][a-zA-Z0-9_-]*)="([^"]*)"/g;
+      let attrMatch;
+      while ((attrMatch = attrPattern.exec(body)) !== null) {
+        attrs.push({ key: attrMatch[1], value: attrMatch[2] });
+      }
+      return { name, attrs };
+    }
+
+    function renderDirectiveCard(directive) {
+      const chips = directive.attrs.map((attr) => `
+        <span class="directive-chip">
+          <span class="directive-chip-key">${escapeHtml(attr.key)}</span>
+          <span class="directive-chip-value">${escapeHtml(attr.value)}</span>
+        </span>
+      `).join("");
+      const dataAttrs = directive.attrs.map((attr) => ` data-attr-${escapeHtml(attr.key)}="${escapeHtml(attr.value)}"`).join("");
+      return `
+        <div class="directive-card" data-directive-name="${escapeHtml(directive.name)}"${dataAttrs}>
+          <div class="directive-name">::${escapeHtml(directive.name)}</div>
+          ${chips ? `<div class="directive-meta">${chips}</div>` : ""}
+          ${directive.name.startsWith("git-") ? '<div class="directive-preview"><div class="directive-preview-note">Loading git preview...</div></div>' : ""}
+        </div>
+      `;
+    }
+
+    async function hydrateDirectivePreviews() {
+      for (const card of conversation.querySelectorAll(".directive-card[data-directive-name^='git-']")) {
+        if (card.dataset.previewHydrated === "1") {
+          continue;
+        }
+        card.dataset.previewHydrated = "1";
+        const preview = card.querySelector(".directive-preview");
+        if (!preview) {
+          continue;
+        }
+        const params = new URLSearchParams({
+          name: card.dataset.directiveName || "",
+          cwd: card.dataset.attrCwd || "",
+        });
+        if (card.dataset.attrBranch) {
+          params.set("branch", card.dataset.attrBranch);
+        }
+        try {
+          const payload = await fetchJson(`/api/git-preview?${params.toString()}`);
+          const entries = Array.isArray(payload.entries) ? payload.entries : [];
+          const summary = entries.length
+            ? `<div class="directive-preview-summary">${entries.map((entry) => `
+                <span class="directive-file-chip">
+                  <span class="directive-file-path">${escapeHtml(entry.path || "")}</span>
+                  <span class="directive-file-delta">${escapeHtml(`+${entry.added ?? "-"} -${entry.deleted ?? "-"}`)}</span>
+                </span>
+              `).join("")}</div>`
+            : '<div class="directive-preview-note">No file changes to preview.</div>';
+          const diffBlock = payload.diff
+            ? `
+              <details class="directive-preview-details">
+                <summary>Show diff</summary>
+                <pre class="directive-preview-pre">${escapeHtml(payload.diff)}</pre>
+              </details>
+            `
+            : "";
+          const note = payload.truncated
+            ? '<div class="directive-preview-note">Diff preview truncated.</div>'
+            : (payload.source ? `<div class="directive-preview-note">Preview source: ${escapeHtml(payload.source)}</div>` : "");
+          preview.innerHTML = `
+            <div class="directive-name">${escapeHtml(payload.title || "Git preview")}</div>
+            ${summary}
+            ${note}
+            ${diffBlock}
+          `;
+        } catch (error) {
+          preview.innerHTML = `<div class="directive-preview-note">${escapeHtml(error.message || String(error))}</div>`;
+        }
+      }
     }
 
     function renderMarkdown(text) {
@@ -1075,6 +1296,21 @@ INDEX_HTML = """<!doctype html>
           parts.push(`<ul>${items.map((item) => `<li>${applyInlineMarkdown(item)}</li>`).join("")}</ul>`);
           continue;
         }
+        const directive = parseDirective(line);
+        if (directive) {
+          const directives = [directive];
+          index += 1;
+          while (index < lines.length) {
+            const nextDirective = parseDirective(lines[index]);
+            if (!nextDirective) {
+              break;
+            }
+            directives.push(nextDirective);
+            index += 1;
+          }
+          parts.push(`<div class="directive-list">${directives.map(renderDirectiveCard).join("")}</div>`);
+          continue;
+        }
         const paragraph = [line];
         index += 1;
         while (
@@ -1082,7 +1318,8 @@ INDEX_HTML = """<!doctype html>
           lines[index].trim() &&
           !lines[index].startsWith("```") &&
           lines[index].trim() !== "$$" &&
-          !/^\\s*[-*]\\s+/.test(lines[index])
+          !/^\\s*[-*]\\s+/.test(lines[index]) &&
+          !parseDirective(lines[index])
         ) {
           paragraph.push(lines[index]);
           index += 1;
@@ -1143,7 +1380,7 @@ INDEX_HTML = """<!doctype html>
     function updateConnectionBadge() {
       connectionBadge.textContent = state.eventSourceHealthy ? "Live" : "Polling";
       streamBadge.className = `live-pill ${state.eventSourceHealthy ? "live" : "syncing"}`;
-      streamBadge.textContent = state.eventSourceHealthy ? "Live updates" : "Reconnecting";
+      streamBadge.textContent = state.eventSourceHealthy ? "Live updates" : "Polling";
     }
 
     function updateSessionCount() {
@@ -1170,15 +1407,32 @@ INDEX_HTML = """<!doctype html>
         const previous = previousById.get(session.id);
         const isNewSession = !previous;
         const changed = previous && (
-          (previous.updatedAt || "") !== (session.updatedAt || "") ||
-          (previous.preview || "") !== (session.preview || "") ||
           (previous.status || "") !== (session.status || "") ||
-          (previous.title || "") !== (session.title || "")
+          (
+            (previous.preview || "") !== (session.preview || "") &&
+            (session.status || "") !== "active"
+          )
         );
         if (isNewSession || changed) {
           state.unseenSessionIds[session.id] = true;
         }
       }
+    }
+
+    function shouldMarkUnseenFromEvent(payload) {
+      const method = payload.method || "";
+      const params = payload.params || {};
+      const item = params.item || {};
+      if (method.startsWith("item/")) {
+        if (item.type === "agentMessage") {
+          return String(item.phase || "").toLowerCase() !== "commentary";
+        }
+        return false;
+      }
+      if (method === "turn/completed" || method === "turn/failed") {
+        return true;
+      }
+      return false;
     }
 
     function unseenCountForGroup(groupKey) {
@@ -1203,6 +1457,7 @@ INDEX_HTML = """<!doctype html>
 
     function conversationKey(messages) {
       return JSON.stringify((messages || []).map((message) => [
+        message.itemId || "",
         message.turnId || "",
         message.turnStatus || "",
         message.timestamp || "",
@@ -1210,6 +1465,55 @@ INDEX_HTML = """<!doctype html>
         message.phase || "",
         message.text || "",
       ]));
+    }
+
+    function messageIdentity(message) {
+      if (message && message.itemId) {
+        return `item:${message.itemId}`;
+      }
+      return JSON.stringify([
+        message?.turnId || "",
+        message?.turnStatus || "",
+        message?.timestamp || "",
+        message?.role || "",
+        message?.phase || "",
+        message?.text || "",
+      ]);
+    }
+
+    function mergeMessages(existingMessages, incomingMessages) {
+      const merged = new Map();
+      for (const message of existingMessages || []) {
+        merged.set(messageIdentity(message), message);
+      }
+      for (const message of incomingMessages || []) {
+        merged.set(messageIdentity(message), message);
+      }
+      return Array.from(merged.values());
+    }
+
+    function prependMessages(olderMessages, existingMessages) {
+      const merged = new Map();
+      for (const message of olderMessages || []) {
+        merged.set(messageIdentity(message), message);
+      }
+      for (const message of existingMessages || []) {
+        merged.set(messageIdentity(message), message);
+      }
+      return Array.from(merged.values());
+    }
+
+    function sessionDetailUrl(sessionId, options = {}) {
+      const params = new URLSearchParams();
+      const limit = options.limit || state.recentTurnsLimit;
+      if (limit) {
+        params.set("limit", String(limit));
+      }
+      if (options.cursor) {
+        params.set("cursor", options.cursor);
+      }
+      const suffix = params.toString();
+      return `/api/sessions/${encodeURIComponent(sessionId)}${suffix ? `?${suffix}` : ""}`;
     }
 
     function renderSessions() {
@@ -1309,7 +1613,19 @@ INDEX_HTML = """<!doctype html>
 
     function renderConversation(detail, forceStick = false) {
       const messages = coalescedMessages(detail.messages || []);
-      const nextConversationKey = conversationKey(messages);
+      const nextConversationKey = `${conversationKey(messages)}|older:${detail.nextCursor || ""}|loading:${state.loadingOlderHistory ? "1" : "0"}`;
+      const trailingCommentaryIndex = (() => {
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          const message = messages[index];
+          if (message?.phase === "commentary") {
+            return index;
+          }
+          if (message?.role === "assistant") {
+            break;
+          }
+        }
+        return -1;
+      })();
       if (
         !forceStick &&
         state.lastRenderedSessionId === state.activeSessionId &&
@@ -1318,9 +1634,19 @@ INDEX_HTML = """<!doctype html>
         return;
       }
       const previousScrollTop = conversation.scrollTop;
+      const loadOlderMarkup = detail.nextCursor
+        ? `<div class="history-loader"><button id="loadOlderButton" class="secondary group-toggle" type="button"${state.loadingOlderHistory ? " disabled" : ""}>${state.loadingOlderHistory ? "Loading..." : "Load older"}</button></div>`
+        : "";
       if (!messages.length) {
-        conversation.innerHTML = '<div class="empty empty-state">No persisted transcript items yet.</div>';
+        conversation.innerHTML = `
+          ${loadOlderMarkup}
+          <div class="empty empty-state">No persisted transcript items yet.</div>
+        `;
         state.lastRenderedConversationKey = nextConversationKey;
+        const emptyLoadOlderButton = document.getElementById("loadOlderButton");
+        if (emptyLoadOlderButton) {
+          emptyLoadOlderButton.addEventListener("click", () => loadOlderHistory());
+        }
         if (forceStick) {
           requestAnimationFrame(() => {
             conversation.scrollTop = conversation.scrollHeight;
@@ -1328,10 +1654,10 @@ INDEX_HTML = """<!doctype html>
         }
         return;
       }
-      conversation.innerHTML = messages.map((message) => `
+      conversation.innerHTML = `${loadOlderMarkup}${messages.map((message, index) => `
         <article class="bubble ${message.role} ${message.phase === "commentary" ? "commentary" : ""}">
           ${message.phase === "commentary" ? `
-            <details class="commentary-details">
+            <details class="commentary-details"${index === trailingCommentaryIndex ? " open" : ""}>
               <summary class="commentary-summary">
                 <strong>Commentary</strong>
               </summary>
@@ -1346,8 +1672,12 @@ INDEX_HTML = """<!doctype html>
             <div class="markdown">${renderMarkdown(message.text || "")}</div>
           `}
         </article>
-      `).join("");
+      `).join("")}`;
       state.lastRenderedConversationKey = nextConversationKey;
+      const loadOlderButton = document.getElementById("loadOlderButton");
+      if (loadOlderButton) {
+        loadOlderButton.addEventListener("click", () => loadOlderHistory());
+      }
       if (transcriptNeedsMath(messages)) {
         ensureMathJax();
       }
@@ -1355,17 +1685,20 @@ INDEX_HTML = """<!doctype html>
         requestAnimationFrame(() => {
           conversation.scrollTop = conversation.scrollHeight;
           maybeTypesetMath();
+          hydrateDirectivePreviews().catch(() => {});
         });
       } else {
         requestAnimationFrame(() => {
           conversation.scrollTop = previousScrollTop;
           maybeTypesetMath();
+          hydrateDirectivePreviews().catch(() => {});
         });
       }
     }
 
     function renderSessionDetail(detail, forceStick = false) {
       const session = detail.session || {};
+      state.activeSessionDetail = detail;
       const nextMetaKey = sessionMetaKey(session);
       if (
         forceStick ||
@@ -1399,11 +1732,18 @@ INDEX_HTML = """<!doctype html>
         state.lastRenderedMetaKey = nextMetaKey;
       }
       state.lastRenderedSessionId = session.id || null;
+      if (session.id && session.id === state.activeSessionId) {
+        promptInput.disabled = false;
+        sendButton.disabled = false;
+        reloadSessionButton.disabled = false;
+      }
       renderConversation(detail, forceStick);
     }
 
     function renderDraftSession() {
       const draft = state.draftSession;
+      state.activeSessionDetail = null;
+      state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
       state.lastRenderedMetaKey = null;
       state.lastRenderedConversationKey = null;
@@ -1437,13 +1777,32 @@ INDEX_HTML = """<!doctype html>
       return data;
     }
 
+    function mergeActiveDetail(incomingDetail) {
+      if (!state.activeSessionDetail) {
+        return incomingDetail;
+      }
+      return {
+        ...state.activeSessionDetail,
+        ...incomingDetail,
+        session: incomingDetail.session || state.activeSessionDetail.session,
+        messages: mergeMessages(state.activeSessionDetail.messages || [], incomingDetail.messages || []),
+        nextCursor: state.activeSessionDetail.nextCursor,
+        backwardsCursor: incomingDetail.backwardsCursor || state.activeSessionDetail.backwardsCursor || null,
+      };
+    }
+
     async function loadSessions() {
+      const requestNonce = ++state.sessionListRequestNonce;
       const suffix = state.defaultCwd && state.defaultCwd !== "all workspaces"
         ? `?cwd=${encodeURIComponent(state.defaultCwd)}&limit=30`
         : "?limit=30";
       const data = await fetchJson(`/api/sessions${suffix}`);
+      if (requestNonce !== state.sessionListRequestNonce) {
+        return;
+      }
       const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
+      const selectedSessionId = state.activeSessionId;
       if (!state.draftSession) {
         if (state.initialSelectionDone) {
           const stillActive = state.activeSessionId && state.sessions.some((session) => session.id === state.activeSessionId);
@@ -1461,7 +1820,7 @@ INDEX_HTML = """<!doctype html>
       renderSessions();
       if (state.draftSession) {
         renderDraftSession();
-      } else if (state.activeSessionId) {
+      } else if (state.activeSessionId && state.activeSessionId === selectedSessionId) {
         await loadSession(state.activeSessionId);
       }
       updateSessionCount();
@@ -1469,10 +1828,14 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function refreshSessionListOnly() {
+      const requestNonce = ++state.sessionListRequestNonce;
       const suffix = state.defaultCwd && state.defaultCwd !== "all workspaces"
         ? `?cwd=${encodeURIComponent(state.defaultCwd)}&limit=30`
         : "?limit=30";
       const data = await fetchJson(`/api/sessions${suffix}`);
+      if (requestNonce !== state.sessionListRequestNonce) {
+        return;
+      }
       const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
       noteBackgroundSessionChanges(previousSessions, state.sessions);
@@ -1483,8 +1846,12 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function loadSession(sessionId) {
+      state.sessionListRequestNonce += 1;
+      const requestNonce = ++state.activeSessionRequestNonce;
       state.draftSession = null;
       state.activeSessionId = sessionId;
+      state.activeSessionDetail = null;
+      state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
       state.lastRenderedMetaKey = null;
       state.lastRenderedConversationKey = null;
@@ -1499,12 +1866,18 @@ INDEX_HTML = """<!doctype html>
       sendButton.disabled = true;
       reloadSessionButton.disabled = true;
       try {
-        const detail = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+        const detail = await fetchJson(sessionDetailUrl(sessionId));
+        if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
+          return;
+        }
         renderSessionDetail(detail, true);
         promptInput.disabled = false;
         sendButton.disabled = false;
         reloadSessionButton.disabled = false;
       } catch (error) {
+        if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
+          return;
+        }
         conversation.innerHTML = "";
         sessionTitle.textContent = error.message || String(error);
       }
@@ -1514,11 +1887,64 @@ INDEX_HTML = """<!doctype html>
       if (!state.activeSessionId || document.hidden) {
         return;
       }
+      const sessionId = state.activeSessionId;
+      const requestNonce = state.activeSessionRequestNonce;
       try {
-        const detail = await fetchJson(`/api/sessions/${encodeURIComponent(state.activeSessionId)}`);
-        renderSessionDetail(detail, false);
+        const detail = await fetchJson(sessionDetailUrl(sessionId));
+        if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
+          return;
+        }
+        renderSessionDetail(mergeActiveDetail(detail), false);
       } catch {
         // Keep the currently rendered session if a transient refresh fails.
+      }
+    }
+
+    async function loadOlderHistory() {
+      const currentDetail = state.activeSessionDetail;
+      if (
+        !state.activeSessionId ||
+        !currentDetail ||
+        !currentDetail.nextCursor ||
+        state.loadingOlderHistory
+      ) {
+        return;
+      }
+      const sessionId = state.activeSessionId;
+      const requestNonce = state.activeSessionRequestNonce;
+      const previousScrollTop = conversation.scrollTop;
+      const previousScrollHeight = conversation.scrollHeight;
+      state.loadingOlderHistory = true;
+      renderConversation(currentDetail, false);
+      try {
+        const olderDetail = await fetchJson(
+          sessionDetailUrl(sessionId, {
+            limit: state.recentTurnsLimit,
+            cursor: currentDetail.nextCursor,
+          }),
+        );
+        if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
+          return;
+        }
+        const combinedDetail = {
+          ...currentDetail,
+          session: olderDetail.session || currentDetail.session,
+          messages: prependMessages(olderDetail.messages || [], currentDetail.messages || []),
+          nextCursor: olderDetail.nextCursor || null,
+          backwardsCursor: currentDetail.backwardsCursor || olderDetail.backwardsCursor || null,
+        };
+        state.loadingOlderHistory = false;
+        renderSessionDetail(combinedDetail, false);
+        requestAnimationFrame(() => {
+          const addedHeight = conversation.scrollHeight - previousScrollHeight;
+          conversation.scrollTop = previousScrollTop + Math.max(0, addedHeight);
+        });
+      } catch {
+        // Leave the current transcript rendered if loading older history fails.
+        if (state.activeSessionId === sessionId && state.activeSessionRequestNonce === requestNonce) {
+          state.loadingOlderHistory = false;
+          renderConversation(currentDetail, false);
+        }
       }
     }
 
@@ -1576,6 +2002,8 @@ INDEX_HTML = """<!doctype html>
       if (!groupKey) {
         return;
       }
+      state.sessionListRequestNonce += 1;
+      state.activeSessionRequestNonce += 1;
       state.draftSession = {
         groupKey,
         cwd: preferredNewSessionCwd(groupKey),
@@ -1649,6 +2077,10 @@ INDEX_HTML = """<!doctype html>
       }
       const threadId = eventThreadId(payload);
       const affectsActive = threadId && threadId === state.activeSessionId;
+      if (threadId && !affectsActive && shouldMarkUnseenFromEvent(payload)) {
+        state.unseenSessionIds[threadId] = true;
+        renderSessions();
+      }
       if (method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/")) {
         scheduleSessionListReload();
       }
@@ -1845,23 +2277,40 @@ class RedexHttpServer(ThreadingHTTPServer):
 class RedexHandler(BaseHTTPRequestHandler):
     server: RedexHttpServer
 
-    def _read_session_detail_with_retry(self, session_id: str) -> dict[str, Any]:
+    def _read_session_detail_with_retry(
+        self,
+        session_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = DEFAULT_TURN_PAGE_LIMIT,
+        sort_direction: str = "desc",
+    ) -> dict[str, Any]:
         last_error: CodexAppServerError | None = None
         for attempt in range(6):
             try:
                 with self._client() as client:
+                    thread_result = client.get_session(session_id, include_turns=False)
                     try:
-                        return client.get_session(session_id, include_turns=True)
+                        turns_result = client.list_session_turns(
+                            session_id,
+                            cursor=cursor,
+                            limit=limit,
+                            sort_direction=sort_direction,
+                        )
                     except CodexAppServerError as exc:
                         if not _is_pre_first_turn_error(exc):
                             raise
                         last_error = exc
-                        try:
-                            return client.get_session(session_id, include_turns=False)
-                        except CodexAppServerError as fallback_exc:
-                            if not _is_pre_first_turn_error(fallback_exc):
-                                raise
-                            last_error = fallback_exc
+                        turns_result = {
+                            "data": [],
+                            "nextCursor": None,
+                            "backwardsCursor": None,
+                        }
+                    return make_session_detail_page_payload(
+                        thread_result,
+                        turns_result,
+                        sort_direction=sort_direction,
+                    )
             except CodexAppServerError as exc:
                 if not _is_pre_first_turn_error(exc):
                     raise
@@ -1887,6 +2336,9 @@ class RedexHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/healthz":
             self._handle_health()
+            return
+        if parsed.path == "/api/git-preview":
+            self._handle_git_preview(parsed.query)
             return
         if parsed.path == "/api/sessions":
             self._handle_list_sessions(parsed.query)
@@ -1980,6 +2432,21 @@ class RedexHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.OK, make_session_list_payload(result))
 
+    def _handle_git_preview(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        name = _first(query.get("name"))
+        cwd = _first(query.get("cwd"))
+        branch = _first(query.get("branch"))
+        if not name or not cwd:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`name` and `cwd` are required."})
+            return
+        try:
+            payload = _build_git_preview(name, cwd, branch)
+        except CodexAppServerError as exc:
+            self._send_error_json(exc)
+            return
+        self._send_json(HTTPStatus.OK, payload)
+
     def _handle_events(self, raw_query: str) -> None:
         query = parse_qs(raw_query)
         session_id = _first(query.get("sessionId"))
@@ -2013,12 +2480,22 @@ class RedexHandler(BaseHTTPRequestHandler):
             return
 
     def _handle_get_session(self, session_id: str) -> None:
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        cursor = _first(query.get("cursor"))
+        limit = _first_int(query.get("limit"), default=DEFAULT_TURN_PAGE_LIMIT)
+        limit = max(1, min(limit, MAX_TURN_PAGE_LIMIT))
         try:
-            result = self._read_session_detail_with_retry(session_id)
+            result = self._read_session_detail_with_retry(
+                session_id,
+                cursor=cursor,
+                limit=limit,
+                sort_direction="desc",
+            )
         except CodexAppServerError as exc:
             self._send_error_json(exc)
             return
-        self._send_json(HTTPStatus.OK, make_session_detail_payload(result))
+        self._send_json(HTTPStatus.OK, result)
 
     def _handle_create_session(self) -> None:
         try:
@@ -2195,3 +2672,75 @@ def _first_bool(values: list[str] | None, *, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _run_git(cwd: str, args: list[str], *, timeout: float = 5.0) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CodexAppServerError(f"git preview failed in {cwd}: {exc}") from exc
+    return result.stdout
+
+
+def _parse_numstat(output: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added_text, deleted_text, path = parts
+        entries.append(
+            {
+                "path": path,
+                "added": int(added_text) if added_text.isdigit() else None,
+                "deleted": int(deleted_text) if deleted_text.isdigit() else None,
+            }
+        )
+    return entries
+
+
+def _truncate_diff(text: str, *, limit: int = 120_000) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
+def _build_git_preview(name: str, cwd: str, branch: str | None = None) -> dict[str, Any]:
+    if name == "git-stage":
+        entries = _parse_numstat(_run_git(cwd, ["diff", "--cached", "--numstat"]))
+        diff, truncated = _truncate_diff(_run_git(cwd, ["diff", "--cached", "--no-color"]))
+        return {
+            "title": "Staged changes",
+            "entries": entries,
+            "diff": diff,
+            "truncated": truncated,
+            "source": "current staged diff",
+        }
+    if name == "git-commit":
+        entries = _parse_numstat(_run_git(cwd, ["show", "--numstat", "--format=", "--no-color", "HEAD"]))
+        diff, truncated = _truncate_diff(_run_git(cwd, ["show", "--no-color", "--format=medium", "HEAD"]))
+        return {
+            "title": "Latest commit",
+            "entries": entries,
+            "diff": diff,
+            "truncated": truncated,
+            "source": "HEAD",
+        }
+    if name == "git-push":
+        target = branch or "HEAD"
+        entries = _parse_numstat(_run_git(cwd, ["show", "--numstat", "--format=", "--no-color", target]))
+        diff, truncated = _truncate_diff(_run_git(cwd, ["show", "--no-color", "--format=medium", target]))
+        return {
+            "title": f"Pushed {target}",
+            "entries": entries,
+            "diff": diff,
+            "truncated": truncated,
+            "source": f"latest commit on {target}",
+        }
+    raise CodexAppServerError(f"unsupported git preview directive: {name}")

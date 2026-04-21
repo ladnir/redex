@@ -257,6 +257,7 @@ def normalize_turns(thread: dict[str, Any]) -> list[dict[str, Any]]:
                     continue
                 messages.append(
                     {
+                        "itemId": item.get("id"),
                         "turnId": turn_id,
                         "turnStatus": turn_status,
                         "timestamp": started_at,
@@ -271,6 +272,7 @@ def normalize_turns(thread: dict[str, Any]) -> list[dict[str, Any]]:
                     continue
                 messages.append(
                     {
+                        "itemId": item.get("id"),
                         "turnId": turn_id,
                         "turnStatus": turn_status,
                         "timestamp": started_at,
@@ -280,6 +282,13 @@ def normalize_turns(thread: dict[str, Any]) -> list[dict[str, Any]]:
                     }
                 )
     return messages
+
+
+def normalize_turn_page(turns: list[dict[str, Any]], *, sort_direction: str = "desc") -> list[dict[str, Any]]:
+    ordered_turns = list(turns)
+    if sort_direction.lower() == "desc":
+        ordered_turns.reverse()
+    return normalize_turns({"turns": ordered_turns})
 
 
 def make_session_list_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +309,28 @@ def make_session_detail_payload(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "session": normalize_thread(thread),
         "messages": normalize_turns(thread),
+    }
+
+
+def make_session_detail_page_payload(
+    thread_result: dict[str, Any],
+    turns_result: dict[str, Any],
+    *,
+    sort_direction: str = "desc",
+) -> dict[str, Any]:
+    thread = thread_result.get("thread")
+    if not isinstance(thread, dict):
+        raise CodexAppServerError("thread/read response did not include a thread object")
+    turns = turns_result.get("data")
+    if not isinstance(turns, list):
+        raise CodexAppServerError("thread/turns/list response did not include a data array")
+    next_cursor = turns_result.get("nextCursor")
+    backwards_cursor = turns_result.get("backwardsCursor")
+    return {
+        "session": normalize_thread(thread),
+        "messages": normalize_turn_page([turn for turn in turns if isinstance(turn, dict)], sort_direction=sort_direction),
+        "nextCursor": next_cursor if isinstance(next_cursor, str) else None,
+        "backwardsCursor": backwards_cursor if isinstance(backwards_cursor, str) else None,
     }
 
 
@@ -411,6 +442,24 @@ class CodexAppServerClient:
             {
                 "threadId": session_id,
                 "includeTurns": include_turns,
+            },
+        )
+
+    def list_session_turns(
+        self,
+        session_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        sort_direction: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "thread/turns/list",
+            {
+                "threadId": session_id,
+                "cursor": cursor,
+                "limit": limit,
+                "sortDirection": sort_direction,
             },
         )
 
