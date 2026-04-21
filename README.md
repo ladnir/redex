@@ -26,6 +26,17 @@ The point of Redex is to keep Codex as close to upstream as possible.
 pip install -e .
 ```
 
+## Recommended Setup
+
+For full live bidirectional sync between Codex desktop and Redex, use the Redex-compatible Codex fork:
+
+- Codex fork: https://github.com/ladnir/codex/tree/redex
+- Redex: https://github.com/ladnir/redex
+
+This fork adds a small app-server change so the desktop-owned runtime can also be discovered over localhost by Redex.
+
+If you are not using the fork, Redex can still work against a standalone websocket app-server, but that is the less integrated fallback mode.
+
 ## Quick Start
 
 Redex needs a live Codex app-server. There are two good ways to provide one:
