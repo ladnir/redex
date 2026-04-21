@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +110,62 @@ def _extract_text_chunks(chunks: list[dict[str, Any]]) -> str:
     return "\n\n".join(part for part in parts if part).strip()
 
 
+@lru_cache(maxsize=512)
+def _workspace_group_for_cwd(cwd: str | None) -> tuple[str | None, str | None]:
+    if not cwd:
+        return None, None
+
+    def repo_group(repo_name: str) -> tuple[str, str]:
+        return f"repo:{repo_name.lower()}", repo_name
+
+    cwd_path = Path(cwd)
+    parts = cwd_path.parts
+    lowered_parts = [part.lower() for part in parts]
+    try:
+        codex_index = lowered_parts.index(".codex")
+    except ValueError:
+        codex_index = -1
+
+    if (
+        codex_index >= 0
+        and len(parts) > codex_index + 3
+        and lowered_parts[codex_index + 1] == "worktrees"
+    ):
+        repo_label = parts[codex_index + 3]
+        return repo_group(repo_label)
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                cwd,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return cwd, cwd_path.name or cwd
+
+    common_dir = result.stdout.strip()
+    if not common_dir:
+        return cwd, cwd_path.name or cwd
+
+    common_path = Path(common_dir)
+    if common_path.name.lower() == ".git":
+        repo_root = common_path.parent
+    else:
+        repo_root = common_path
+
+    label = repo_root.name or str(repo_root)
+    return repo_group(label)
+
+
 def normalize_thread(thread: dict[str, Any]) -> dict[str, Any]:
     git_info = thread.get("gitInfo")
     git_branch = git_info.get("branch") if isinstance(git_info, dict) else None
@@ -115,11 +173,13 @@ def normalize_thread(thread: dict[str, Any]) -> dict[str, Any]:
     status_type = status.get("type") if isinstance(status, dict) else status
     title = thread.get("name")
     preview = thread.get("preview")
+    cwd = thread.get("cwd")
+    workspace_group, workspace_group_label = _workspace_group_for_cwd(cwd if isinstance(cwd, str) else None)
     return {
         "id": thread.get("id"),
         "title": title or preview or thread.get("id"),
         "preview": preview.strip() if isinstance(preview, str) else None,
-        "cwd": thread.get("cwd"),
+        "cwd": cwd,
         "path": thread.get("path"),
         "source": thread.get("source"),
         "modelProvider": thread.get("modelProvider"),
@@ -127,6 +187,8 @@ def normalize_thread(thread: dict[str, Any]) -> dict[str, Any]:
         "updatedAt": _epoch_seconds_to_iso(thread.get("updatedAt")),
         "status": status_type,
         "gitBranch": git_branch,
+        "workspaceGroup": workspace_group,
+        "workspaceGroupLabel": workspace_group_label,
     }
 
 

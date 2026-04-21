@@ -28,83 +28,137 @@ INDEX_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#122133">
   <title>Redex</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f4f0e8;
-      --panel: rgba(255, 252, 247, 0.92);
-      --ink: #1d1a17;
-      --muted: #6c6256;
-      --line: rgba(58, 45, 28, 0.15);
-      --accent: #0f6a5b;
-      --accent-soft: rgba(15, 106, 91, 0.12);
-      --user: #f3d9b1;
-      --assistant: #d7ece4;
+      color-scheme: dark;
+      --bg: #122133;
+      --panel: rgba(24, 38, 56, 0.96);
+      --panel-strong: rgba(31, 47, 68, 0.99);
+      --ink: #f8fbff;
+      --muted: #8e9bab;
+      --line: rgba(170, 205, 238, 0.16);
+      --accent: #dcecff;
+      --accent-strong: #f8fbff;
+      --accent-soft: rgba(220, 236, 255, 0.12);
+      --accent-glow: rgba(128, 176, 224, 0.12);
+      --tint: #7fb0de;
+      --tint-strong: #e3f0ff;
+      --tint-soft: rgba(127, 176, 222, 0.12);
+      --user: rgba(64, 84, 109, 0.97);
+      --assistant: rgba(18, 30, 44, 0.97);
+      --danger: #ffffff;
+      --danger-soft: rgba(255, 255, 255, 0.08);
     }
 
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Segoe UI", ui-sans-serif, sans-serif;
+      font-family: "Aptos", "Segoe UI", ui-sans-serif, sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(15, 106, 91, 0.12), transparent 34rem),
-        radial-gradient(circle at top right, rgba(194, 132, 54, 0.10), transparent 24rem),
-        var(--bg);
+        radial-gradient(circle at top left, rgba(127, 176, 222, 0.24), transparent 24rem),
+        radial-gradient(circle at top right, rgba(90, 130, 171, 0.16), transparent 20rem),
+        linear-gradient(180deg, rgba(180, 212, 245, 0.1), transparent 24rem),
+        linear-gradient(180deg, #172739 0%, #122133 100%);
     }
     .app {
       min-height: 100vh;
-      max-width: 72rem;
+      max-width: 88rem;
       margin: 0 auto;
-      padding: 1rem;
+      padding: 1.1rem;
       display: grid;
-      gap: 1rem;
+      gap: 1.1rem;
     }
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 1rem;
-      box-shadow: 0 1rem 2rem rgba(24, 18, 12, 0.06);
-      backdrop-filter: blur(10px);
+      border-radius: 1.2rem;
+      box-shadow: 0 1rem 2.8rem rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(14px);
     }
     .hero {
-      padding: 1.25rem;
+      padding: 0.85rem 1rem;
+    }
+    .hero-grid {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
     }
     .hero h1 {
-      margin: 0 0 0.5rem;
-      font-size: 1.5rem;
-    }
-    .hero p {
       margin: 0;
-      color: var(--muted);
-      line-height: 1.4;
+      font-size: 1.15rem;
+      letter-spacing: -0.03em;
     }
-    .workspace-pill {
-      display: inline-block;
-      margin-top: 0.75rem;
-      padding: 0.4rem 0.65rem;
+    .hero-copy {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      min-width: 0;
+    }
+    .stat-pill {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.38rem 0.6rem;
       border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 0.85rem;
+      border: 1px solid var(--line);
+      background: rgba(77, 111, 146, 0.34);
+    }
+    .stat-label {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .stat-value {
+      font-size: 0.84rem;
+      font-weight: 700;
     }
     .layout {
       display: grid;
       gap: 1rem;
+      min-width: 0;
     }
     .sidebar,
     .session {
       padding: 1rem;
+      min-width: 0;
     }
-    .toolbar {
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+    }
+    .session {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .sidebar-header,
+    .session-header {
       display: flex;
       gap: 0.5rem;
       align-items: center;
-      margin-bottom: 0.75rem;
+      justify-content: space-between;
+      margin-bottom: 0.9rem;
+    }
+    .sidebar-copy h2,
+    .session-heading h2 {
+      margin: 0;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+    .sidebar-copy p,
+    .session-heading p {
+      margin: 0.2rem 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
     }
     button,
-    textarea {
+    textarea,
+    input {
       font: inherit;
     }
     button {
@@ -112,36 +166,86 @@ INDEX_HTML = """<!doctype html>
       border-radius: 0.85rem;
       padding: 0.7rem 1rem;
       background: var(--accent);
-      color: white;
+      color: #111111;
       cursor: pointer;
+      transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+      box-shadow: 0 0.45rem 1rem rgba(4, 10, 18, 0.34);
+    }
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 0.7rem 1.25rem rgba(4, 10, 18, 0.42);
+      background: var(--accent-strong);
     }
     button.secondary {
-      background: rgba(29, 26, 23, 0.08);
+      background: rgba(57, 81, 108, 0.88);
       color: var(--ink);
+      box-shadow: none;
     }
     button:disabled {
       opacity: 0.55;
       cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    .search {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 0.95rem;
+      padding: 0.8rem 0.9rem;
+      background: rgba(47, 69, 94, 0.88);
+      color: var(--ink);
+      margin-bottom: 0.85rem;
+    }
+    .search::placeholder,
+    textarea::placeholder {
+      color: rgba(142, 167, 187, 0.8);
     }
     .session-list {
       display: grid;
       gap: 0.6rem;
+      max-height: 20rem;
+      overflow: auto;
+      overflow-x: hidden;
+      padding-right: 0.15rem;
+      min-width: 0;
     }
     .session-card {
       width: 100%;
       text-align: left;
-      background: white;
+      background: rgba(38, 56, 78, 0.9);
       color: var(--ink);
       border: 1px solid var(--line);
-      padding: 0.9rem;
+      padding: 0.95rem;
+      box-shadow: none;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .session-card:hover {
+      background: var(--panel-strong);
     }
     .session-card.active {
-      outline: 2px solid rgba(15, 106, 91, 0.35);
-      background: rgba(15, 106, 91, 0.07);
+      outline: 2px solid rgba(255, 255, 255, 0.14);
+      background: rgba(68, 99, 132, 0.72);
+      box-shadow: 0 0 0 0.35rem rgba(127, 176, 222, 0.12);
+    }
+    .session-card-title {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.35rem;
     }
     .session-card strong {
       display: block;
-      margin-bottom: 0.3rem;
+      font-size: 0.98rem;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+    .session-id {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.75rem;
     }
     .meta,
     .preview,
@@ -152,55 +256,429 @@ INDEX_HTML = """<!doctype html>
       font-size: 0.92rem;
       line-height: 1.35;
     }
+    .preview {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 1;
+      overflow: hidden;
+      min-height: 1.35em;
+    }
+    .session-card-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.55rem;
+    }
+    .session-group {
+      display: grid;
+      gap: 0.6rem;
+    }
+    .session-group + .session-group {
+      margin-top: 0.35rem;
+    }
+    .session-group-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.75rem;
+      padding: 0 0.2rem;
+    }
+    .session-group-title {
+      font-size: 0.86rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .session-group-subtitle {
+      color: var(--muted);
+      font-size: 0.76rem;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .group-toggle {
+      justify-self: start;
+      padding: 0.45rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(55, 80, 108, 0.86);
+      color: var(--ink);
+      box-shadow: none;
+      font-size: 0.82rem;
+    }
+    .group-toggle:hover:not(:disabled) {
+      background: rgba(75, 106, 140, 0.92);
+    }
+    .group-header-actions {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .group-collapse {
+      padding: 0.34rem 0.64rem;
+      border-radius: 999px;
+      background: rgba(55, 80, 108, 0.86);
+      color: var(--ink);
+      box-shadow: none;
+      font-size: 0.78rem;
+    }
+    .group-collapse:hover:not(:disabled) {
+      background: rgba(75, 106, 140, 0.92);
+    }
+    .status-pill,
+    .mini-pill,
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38rem;
+      padding: 0.26rem 0.58rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      border: 1px solid var(--line);
+      background: rgba(49, 74, 102, 0.86);
+      color: var(--ink);
+    }
+    .status-pill {
+      background: var(--tint-soft);
+      color: var(--tint-strong);
+      border-color: rgba(159, 214, 255, 0.16);
+    }
+    .status-pill.unknown {
+      background: rgba(57, 81, 108, 0.88);
+      color: var(--muted);
+    }
+    .live-pill.live {
+      background: var(--tint-soft);
+      color: var(--tint-strong);
+      border-color: rgba(159, 214, 255, 0.16);
+    }
+    .live-pill.syncing {
+      background: rgba(57, 81, 108, 0.88);
+      color: var(--ink);
+      border-color: rgba(170, 205, 238, 0.16);
+    }
+    .live-pill.error {
+      background: var(--danger-soft);
+      color: var(--danger);
+      border-color: rgba(157, 63, 44, 0.22);
+    }
+    .detail-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.42rem;
+      margin-bottom: 0.7rem;
+      min-width: 0;
+    }
+    .detail-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.34rem;
+      max-width: 100%;
+      min-width: 0;
+      padding: 0.3rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(45, 68, 94, 0.84);
+      border: 1px solid var(--line);
+    }
+    .detail-chip-label {
+      color: var(--muted);
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .detail-chip-value {
+      font-size: 0.8rem;
+      line-height: 1.2;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .detail-chip-value.mono {
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.74rem;
+    }
     .conversation {
       display: grid;
-      gap: 0.75rem;
-      margin: 1rem 0;
+      gap: 0.45rem;
+      margin: 0.75rem 0;
+      padding-right: 0.2rem;
+      min-height: 18rem;
+      max-height: 50vh;
+      overflow: auto;
+      overflow-x: hidden;
+      min-width: 0;
+      padding-bottom: 0.4rem;
     }
     .bubble {
-      padding: 0.85rem 0.95rem;
-      border-radius: 1rem;
+      padding: 0.58rem 0.74rem;
+      border-radius: 0.9rem;
       border: 1px solid var(--line);
-      white-space: pre-wrap;
-      line-height: 1.45;
+      line-height: 1.36;
+      width: fit-content;
+      max-width: min(54rem, 100%);
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .bubble.user {
       background: var(--user);
+      margin-left: auto;
     }
     .bubble.assistant {
-      background: var(--assistant);
+      background: transparent;
+      margin-right: auto;
+      border: 0;
+      border-left: 2px solid rgba(134, 185, 230, 0.2);
+      border-radius: 0;
+      box-shadow: none;
+      padding: 0.18rem 0 0.18rem 0.78rem;
+      max-width: min(48rem, 100%);
+    }
+    .bubble.commentary {
+      background: transparent;
+      color: rgba(220, 232, 246, 0.72);
+      font-size: 0.93rem;
+      border: 0;
+      border-left: 2px solid rgba(134, 185, 230, 0.18);
+      border-radius: 0;
+      box-shadow: none;
+      padding: 0.05rem 0 0.05rem 0.7rem;
+      margin-right: auto;
+      margin-left: 0;
+      max-width: min(46rem, 100%);
+    }
+    .commentary-details {
+      width: 100%;
+    }
+    .commentary-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.78rem;
+      list-style: none;
+      user-select: none;
+    }
+    .commentary-summary::-webkit-details-marker {
+      display: none;
+    }
+    .commentary-summary::before {
+      content: ">";
+      display: inline-block;
+      transition: transform 120ms ease;
+    }
+    .commentary-details[open] .commentary-summary::before {
+      transform: rotate(90deg);
+    }
+    .commentary-body {
+      margin-top: 0.32rem;
+    }
+    .meta-details {
+      margin-bottom: 0.65rem;
+    }
+    .meta-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.78rem;
+      list-style: none;
+      user-select: none;
+    }
+    .meta-summary::-webkit-details-marker {
+      display: none;
+    }
+    .meta-summary::before {
+      content: ">";
+      display: inline-block;
+      transition: transform 120ms ease;
+    }
+    .meta-details[open] .meta-summary::before {
+      transform: rotate(90deg);
     }
     .bubble-header {
       display: flex;
+      flex-wrap: wrap;
       gap: 0.5rem;
       align-items: baseline;
-      margin-bottom: 0.4rem;
-      font-size: 0.82rem;
+      margin-bottom: 0.22rem;
+      font-size: 0.76rem;
       color: var(--muted);
+    }
+    .phase-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.12rem 0.4rem;
+      border-radius: 999px;
+      background: rgba(57, 81, 108, 0.84);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .bubble.commentary .phase-chip {
+      background: rgba(49, 74, 102, 0.8);
+      color: rgba(142, 167, 187, 0.9);
+    }
+    .markdown {
+      font-size: 0.96rem;
+      min-width: 0;
+    }
+    .bubble.assistant .markdown {
+      color: #ffffff;
+    }
+    .bubble.commentary .markdown {
+      font-size: 0.92rem;
+      color: rgba(225, 235, 247, 0.78);
+    }
+    .markdown p {
+      margin: 0;
+    }
+    .markdown p + p,
+    .markdown p + ul,
+    .markdown p + ol,
+    .markdown ul + p,
+    .markdown ol + p,
+    .markdown pre + p {
+      margin-top: 0.48rem;
+    }
+    .markdown ul,
+    .markdown ol {
+      margin: 0.36rem 0 0.36rem 1.2rem;
+      padding: 0;
+    }
+    .markdown li + li {
+      margin-top: 0.2rem;
+    }
+    .markdown a {
+      color: var(--tint-strong);
+      text-decoration: underline;
+      text-decoration-thickness: 0.08em;
+      text-underline-offset: 0.14em;
+      word-break: break-word;
+    }
+    .markdown code {
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      background: rgba(57, 81, 108, 0.82);
+      border-radius: 0.45rem;
+      padding: 0.12rem 0.34rem;
+      font-size: 0.88em;
+    }
+    .markdown pre {
+      margin: 0.48rem 0 0;
+      padding: 0.7rem 0.8rem;
+      border-radius: 0.8rem;
+      background: rgba(15, 24, 36, 0.92);
+      color: #f8fbff;
+      overflow: auto;
+      border: 1px solid rgba(196, 220, 242, 0.14);
+    }
+    .markdown pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+      border-radius: 0;
+      font-size: 0.9rem;
+    }
+    .markdown img,
+    .markdown table {
+      max-width: 100%;
+    }
+    .math-inline,
+    .math-block {
+      color: var(--tint-strong);
+    }
+    .math-block {
+      margin-top: 0.48rem;
+      padding: 0.55rem 0.7rem;
+      border-radius: 0.8rem;
+      background: rgba(68, 99, 132, 0.42);
+      overflow-x: auto;
+    }
+    .composer-shell {
+      border-top: 1px solid var(--line);
+      padding-top: 0.75rem;
+      min-width: 0;
+      background: linear-gradient(180deg, rgba(7, 16, 25, 0.2), rgba(7, 16, 25, 0.92) 22%, rgba(7, 16, 25, 0.98));
+      backdrop-filter: blur(10px);
+      flex: 0 0 auto;
     }
     textarea {
       width: 100%;
-      min-height: 7rem;
+      min-height: 3.25rem;
+      max-height: 9rem;
       resize: vertical;
       border: 1px solid var(--line);
       border-radius: 1rem;
       padding: 0.9rem;
-      background: white;
+      background: rgba(45, 68, 94, 0.9);
+      color: var(--ink);
+    }
+    .composer-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.65rem;
+      align-items: end;
     }
     .composer-actions {
       display: flex;
-      gap: 0.5rem;
-      justify-content: flex-end;
-      margin-top: 0.75rem;
+      align-items: flex-end;
+    }
+    .send-icon-button {
+      width: 3rem;
+      height: 3rem;
+      min-width: 3rem;
+      padding: 0;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+      line-height: 1;
+    }
+    .empty-state {
+      padding: 1.1rem;
+      border-radius: 1rem;
+      background: rgba(45, 68, 94, 0.72);
+      border: 1px dashed var(--line);
     }
     @media (min-width: 860px) {
+      html, body {
+        height: 100%;
+        overflow: hidden;
+      }
+      .app {
+        height: 100vh;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+      }
       .layout {
         grid-template-columns: 22rem 1fr;
-        align-items: start;
+        align-items: stretch;
+        min-height: 0;
+        height: 100%;
+        overflow: hidden;
       }
       .sidebar,
       .session {
-        min-height: 70vh;
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .sidebar {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        align-content: stretch;
+      }
+      .session {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        align-content: stretch;
+      }
+      .session-list {
+        min-height: 0;
+        max-height: none;
+      }
+      .conversation {
+        min-height: 0;
+        max-height: none;
       }
     }
   </style>
@@ -208,29 +686,49 @@ INDEX_HTML = """<!doctype html>
 <body>
   <div class="app">
     <section class="panel hero">
-      <h1>Redex</h1>
-      <p>External control for local Codex chats. Pick a session, read the transcript, and push a real new prompt into the existing chat.</p>
-      <div class="workspace-pill">Default workspace: __DEFAULT_CWD__</div>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <h1>Redex</h1>
+          <div class="stat-pill">
+            <span class="stat-label">Runtime</span>
+            <span id="connectionBadge" class="stat-value">Connecting</span>
+          </div>
+        </div>
+        <span id="sessionCount" class="mini-pill">0 sessions</span>
+      </div>
     </section>
 
     <section class="layout">
       <aside class="panel sidebar">
-        <div class="toolbar">
+        <div class="sidebar-header">
+          <div class="sidebar-copy">
+            <h2>Sessions</h2>
+            <p>Attach to an active Codex thread.</p>
+          </div>
           <button id="refreshButton" class="secondary" type="button">Refresh</button>
         </div>
+        <input id="searchInput" class="search" type="search" placeholder="Search titles, prompts, or ids">
         <div id="sessionList" class="session-list"></div>
       </aside>
 
       <main class="panel session">
-        <div class="toolbar">
-          <button id="reloadSessionButton" class="secondary" type="button" disabled>Reload Session</button>
+        <div class="session-header">
+          <div class="session-heading">
+            <h2 id="sessionTitle">Select a session</h2>
+          </div>
+          <div style="display:flex; gap:0.5rem; align-items:center;">
+            <span id="streamBadge" class="live-pill syncing">Syncing</span>
+            <button id="reloadSessionButton" class="secondary" type="button" disabled>Reload</button>
+          </div>
         </div>
-        <div id="sessionMeta" class="meta">Select a session.</div>
+        <div id="sessionMeta" class="detail-strip"></div>
         <div id="conversation" class="conversation"></div>
-        <form id="composer">
-          <textarea id="promptInput" placeholder="Send a new prompt into this session..." disabled></textarea>
-          <div class="composer-actions">
-            <button id="sendButton" type="submit" disabled>Send Prompt</button>
+        <form id="composer" class="composer-shell">
+          <div class="composer-row">
+            <textarea id="promptInput" placeholder="Send a new prompt into this session..." disabled></textarea>
+            <div class="composer-actions">
+              <button id="sendButton" class="send-icon-button" type="submit" disabled aria-label="Send prompt" title="Send prompt">↑</button>
+            </div>
           </div>
         </form>
       </main>
@@ -238,10 +736,23 @@ INDEX_HTML = """<!doctype html>
   </div>
 
   <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [["\\\\(", "\\\\)"]],
+        displayMath: [["\\\\[", "\\\\]"]],
+      },
+      options: {
+        skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      },
+    };
     const state = {
       sessions: [],
       activeSessionId: null,
       defaultCwd: "__DEFAULT_CWD__",
+      searchQuery: "",
+      expandedGroups: {},
+      collapsedGroups: {},
+      mathJaxRequested: false,
       eventSource: null,
       eventSourceSessionId: null,
       eventSourceHealthy: false,
@@ -252,66 +763,409 @@ INDEX_HTML = """<!doctype html>
     };
 
     const sessionList = document.getElementById("sessionList");
+    const sessionTitle = document.getElementById("sessionTitle");
     const sessionMeta = document.getElementById("sessionMeta");
     const conversation = document.getElementById("conversation");
     const promptInput = document.getElementById("promptInput");
     const sendButton = document.getElementById("sendButton");
     const reloadSessionButton = document.getElementById("reloadSessionButton");
+    const connectionBadge = document.getElementById("connectionBadge");
+    const sessionCount = document.getElementById("sessionCount");
+    const streamBadge = document.getElementById("streamBadge");
+    const searchInput = document.getElementById("searchInput");
 
     function escapeHtml(value) {
-      return value
+      return String(value ?? "")
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;");
     }
 
-    function setStatus(message, isError = false) {
-      sessionMeta.className = isError ? "error" : "meta";
-      sessionMeta.textContent = message;
+    function basename(path) {
+      if (!path) {
+        return "";
+      }
+      const parts = String(path).split(/[\\\\/]/).filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : String(path);
+    }
+
+    function shortId(id) {
+      if (!id) {
+        return "";
+      }
+      return String(id).slice(0, 8);
+    }
+
+    function sessionStatusClass(status) {
+      return status ? String(status).replace(/[^a-z0-9_-]+/gi, "-").toLowerCase() : "unknown";
+    }
+
+    function phaseLabel(message) {
+      const raw = String(message.phase || (message.role === "assistant" ? "reply" : "prompt")).toLowerCase();
+      if (raw === "prompt" || raw === "final_answer" || raw === "reply") {
+        return "";
+      }
+      return raw.replaceAll("_", " ");
+    }
+
+    function visibleSessions() {
+      const query = (state.searchQuery || "").trim().toLowerCase();
+      if (!query) {
+        return state.sessions;
+      }
+      return state.sessions.filter((session) => {
+        const haystack = [
+          session.title,
+          session.preview,
+          session.id,
+          session.cwd,
+          session.gitBranch,
+        ]
+          .filter(Boolean)
+          .join("\\n")
+          .toLowerCase();
+        return haystack.includes(query);
+      });
+    }
+
+    function groupedSessions() {
+      const groups = new Map();
+      for (const session of visibleSessions()) {
+        const key = session.workspaceGroup || session.cwd || "all-workspaces";
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key,
+            label: session.workspaceGroupLabel || basename(session.workspaceGroup || session.cwd) || "All workspaces",
+            subtitle: session.workspaceGroup || session.cwd || "All workspaces",
+            newest: session.updatedAt || "",
+            sessions: [],
+          });
+        }
+        const group = groups.get(key);
+        group.sessions.push(session);
+        if ((session.updatedAt || "") > group.newest) {
+          group.newest = session.updatedAt || "";
+        }
+      }
+      return Array.from(groups.values())
+        .map((group) => ({
+          ...group,
+          sessions: [...group.sessions].sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || "")),
+        }))
+        .sort((left, right) => (right.newest || "").localeCompare(left.newest || ""));
+    }
+
+    function newestActiveSessionId() {
+      const sessions = visibleSessions();
+      if (!sessions.length) {
+        return null;
+      }
+      const sorted = [...sessions].sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || ""));
+      return sorted[0]?.id || null;
+    }
+
+    function sessionsForGroup(group) {
+      const allSessions = group.sessions || [];
+      if (state.expandedGroups[group.key] || allSessions.length <= 4) {
+        return allSessions;
+      }
+      return allSessions.slice(0, 4);
+    }
+
+    function applyInlineMarkdown(text) {
+      let working = String(text || "");
+      const slots = [];
+      const stash = (pattern, render) => {
+        working = working.replace(pattern, (...args) => {
+          const html = render(...args);
+          const index = slots.push(html) - 1;
+          return `@@REDX_SLOT_${index}@@`;
+        });
+      };
+
+      stash(/`([^`\\n]+)`/g, (_, code) => `<code>${escapeHtml(code)}</code>`);
+      stash(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, (_, label, href) => (
+        `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+      ));
+      stash(/(^|[\\s(])(https?:\\/\\/[^\\s<)]+)/g, (_, prefix, href) => (
+        `${prefix}<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(href)}</a>`
+      ));
+      stash(/\\$\\$([\\s\\S]+?)\\$\\$/g, (_, expr) => `<div class="math-block">\\\\[${escapeHtml(expr.trim())}\\\\]</div>`);
+      stash(/\\$([^\\n$]+?)\\$/g, (_, expr) => `<span class="math-inline">\\\\(${escapeHtml(expr.trim())}\\\\)</span>`);
+
+      working = escapeHtml(working).replace(/\\n/g, "<br>");
+      return working.replace(/@@REDX_SLOT_(\\d+)@@/g, (_, index) => slots[Number(index)] || "");
+    }
+
+    function renderMarkdown(text) {
+      const normalized = String(text || "").replace(/\\r\\n?/g, "\\n");
+      const lines = normalized.split("\\n");
+      const parts = [];
+      let index = 0;
+
+      while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) {
+          index += 1;
+          continue;
+        }
+        if (line.startsWith("```")) {
+          const language = line.slice(3).trim();
+          index += 1;
+          const block = [];
+          while (index < lines.length && !lines[index].startsWith("```")) {
+            block.push(lines[index]);
+            index += 1;
+          }
+          if (index < lines.length) {
+            index += 1;
+          }
+          parts.push(`<pre><code data-lang="${escapeHtml(language)}">${escapeHtml(block.join("\\n"))}</code></pre>`);
+          continue;
+        }
+        if (line.trim() === "$$") {
+          index += 1;
+          const block = [];
+          while (index < lines.length && lines[index].trim() !== "$$") {
+            block.push(lines[index]);
+            index += 1;
+          }
+          if (index < lines.length) {
+            index += 1;
+          }
+          parts.push(`<div class="math-block">\\\\[${escapeHtml(block.join("\\n").trim())}\\\\]</div>`);
+          continue;
+        }
+        if (/^\\s*[-*]\\s+/.test(line)) {
+          const items = [];
+          while (index < lines.length && /^\\s*[-*]\\s+/.test(lines[index])) {
+            items.push(lines[index].replace(/^\\s*[-*]\\s+/, ""));
+            index += 1;
+          }
+          parts.push(`<ul>${items.map((item) => `<li>${applyInlineMarkdown(item)}</li>`).join("")}</ul>`);
+          continue;
+        }
+        const paragraph = [line];
+        index += 1;
+        while (
+          index < lines.length &&
+          lines[index].trim() &&
+          !lines[index].startsWith("```") &&
+          lines[index].trim() !== "$$" &&
+          !/^\\s*[-*]\\s+/.test(lines[index])
+        ) {
+          paragraph.push(lines[index]);
+          index += 1;
+        }
+        parts.push(`<p>${applyInlineMarkdown(paragraph.join("\\n"))}</p>`);
+      }
+
+      return parts.join("");
+    }
+
+    function transcriptNeedsMath(messages) {
+      return (messages || []).some((message) => {
+        const text = String(message.text || "");
+        return text.includes("$$") || text.includes("\\\\(") || text.includes("\\\\[") || /\\$[^\\n$]+\\$/.test(text);
+      });
+    }
+
+    function coalescedMessages(messages) {
+      const collapsed = [];
+      for (const message of messages || []) {
+        if (
+          message &&
+          message.phase === "commentary" &&
+          collapsed.length &&
+          collapsed[collapsed.length - 1].phase === "commentary"
+        ) {
+          const previous = collapsed[collapsed.length - 1];
+          previous.text = `${previous.text || ""}\n\n${message.text || ""}`.trim();
+          continue;
+        }
+        collapsed.push({ ...message });
+      }
+      return collapsed;
+    }
+
+    function ensureMathJax() {
+      if (window.MathJax && window.MathJax.typesetPromise) {
+        return;
+      }
+      if (state.mathJaxRequested) {
+        return;
+      }
+      state.mathJaxRequested = true;
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
+      script.async = true;
+      script.onload = () => window.dispatchEvent(new Event("redex-math-ready"));
+      document.head.appendChild(script);
+    }
+
+    function maybeTypesetMath() {
+      if (!window.MathJax || !window.MathJax.typesetPromise) {
+        return Promise.resolve();
+      }
+      return window.MathJax.typesetPromise([conversation]).catch(() => {});
+    }
+
+    function updateConnectionBadge() {
+      connectionBadge.textContent = state.eventSourceHealthy ? "Live" : "Polling";
+      streamBadge.className = `live-pill ${state.eventSourceHealthy ? "live" : "syncing"}`;
+      streamBadge.textContent = state.eventSourceHealthy ? "Live updates" : "Reconnecting";
+    }
+
+    function updateSessionCount() {
+      const count = visibleSessions().length;
+      sessionCount.textContent = `${count} session${count === 1 ? "" : "s"}`;
     }
 
     function renderSessions() {
-      if (!state.sessions.length) {
-        sessionList.innerHTML = '<div class="empty">No sessions found yet.</div>';
+      const groups = groupedSessions();
+      updateSessionCount();
+      if (!groups.length) {
+        sessionList.innerHTML = '<div class="empty empty-state">No sessions match this view yet.</div>';
         return;
       }
-      sessionList.innerHTML = state.sessions.map((session) => {
-        const activeClass = session.id === state.activeSessionId ? "active" : "";
+      sessionList.innerHTML = groups.map((group) => {
+        const visibleGroupSessions = sessionsForGroup(group);
+        const hiddenCount = Math.max(0, group.sessions.length - visibleGroupSessions.length);
+        const isCollapsed = !!state.collapsedGroups[group.key];
         return `
-          <button class="session-card ${activeClass}" type="button" data-session-id="${session.id}">
-            <strong>${escapeHtml(session.title || session.id)}</strong>
-            <div class="preview">${escapeHtml(session.preview || "")}</div>
-            <div class="status">${escapeHtml(session.status || "unknown")} - ${escapeHtml(session.updatedAt || "")}</div>
-          </button>
+          <section class="session-group">
+            <div class="session-group-header">
+              <div>
+                <div class="session-group-title">${escapeHtml(group.label)}</div>
+                <div class="session-group-subtitle">${escapeHtml(group.subtitle)}</div>
+              </div>
+              <div class="group-header-actions">
+                <span class="mini-pill">${escapeHtml(String(group.sessions.length))}</span>
+                <button class="group-collapse secondary" type="button" data-group-collapse="${escapeHtml(group.key)}">${isCollapsed ? "Expand" : "Collapse"}</button>
+              </div>
+            </div>
+            ${isCollapsed ? "" : visibleGroupSessions.map((session) => {
+              const activeClass = session.id === state.activeSessionId ? "active" : "";
+              return `
+                <button class="session-card ${activeClass}" type="button" data-session-id="${session.id}">
+                  <div class="session-card-title">
+                    <strong>${escapeHtml(session.title || session.id)}</strong>
+                    <span class="session-id">${escapeHtml(shortId(session.id))}</span>
+                  </div>
+                  <div class="preview">${escapeHtml(session.preview || "")}</div>
+                </button>
+              `;
+            }).join("")}
+            ${!isCollapsed && hiddenCount > 0 ? `<button class="group-toggle secondary" type="button" data-group-key="${escapeHtml(group.key)}">Show ${hiddenCount} more</button>` : ""}
+            ${!isCollapsed && group.sessions.length > 4 && state.expandedGroups[group.key] ? `<button class="group-toggle secondary" type="button" data-group-key="${escapeHtml(group.key)}" data-collapse="1">Show less</button>` : ""}
+          </section>
         `;
       }).join("");
       for (const element of sessionList.querySelectorAll("[data-session-id]")) {
         element.addEventListener("click", () => loadSession(element.dataset.sessionId));
       }
+      for (const element of sessionList.querySelectorAll("[data-group-collapse]")) {
+        element.addEventListener("click", () => {
+          const key = element.dataset.groupCollapse;
+          if (!key) {
+            return;
+          }
+          if (state.collapsedGroups[key]) {
+            delete state.collapsedGroups[key];
+          } else {
+            state.collapsedGroups[key] = true;
+          }
+          renderSessions();
+        });
+      }
+      for (const element of sessionList.querySelectorAll("[data-group-key]")) {
+        element.addEventListener("click", () => {
+          const key = element.dataset.groupKey;
+          if (!key) {
+            return;
+          }
+          if (element.dataset.collapse === "1") {
+            delete state.expandedGroups[key];
+          } else {
+            state.expandedGroups[key] = true;
+          }
+          renderSessions();
+        });
+      }
     }
 
-    function renderConversation(detail) {
-      const messages = detail.messages || [];
+    function renderConversation(detail, forceStick = false) {
+      const messages = coalescedMessages(detail.messages || []);
+      const shouldStick = forceStick || (conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 120);
       if (!messages.length) {
-        conversation.innerHTML = '<div class="empty">No persisted transcript items yet.</div>';
+        conversation.innerHTML = '<div class="empty empty-state">No persisted transcript items yet.</div>';
         return;
       }
       conversation.innerHTML = messages.map((message) => `
-        <article class="bubble ${message.role}">
-          <div class="bubble-header">
-            <strong>${escapeHtml(message.role)}</strong>
-            <span>${escapeHtml(message.phase || "")}</span>
-            <span>${escapeHtml(message.timestamp || "")}</span>
-          </div>
-          <div>${escapeHtml(message.text || "")}</div>
+        <article class="bubble ${message.role} ${message.phase === "commentary" ? "commentary" : ""}">
+          ${message.phase === "commentary" ? `
+            <details class="commentary-details">
+              <summary class="commentary-summary">
+                <strong>Commentary</strong>
+              </summary>
+              <div class="commentary-body markdown">${renderMarkdown(message.text || "")}</div>
+            </details>
+          ` : `
+            <div class="bubble-header">
+              <strong>${escapeHtml(message.role === "assistant" ? "Codex" : "You")}</strong>
+              ${!phaseLabel(message) ? "" : `<span class="phase-chip">${escapeHtml(phaseLabel(message))}</span>`}
+              <span>${escapeHtml(message.timestamp || "")}</span>
+            </div>
+            <div class="markdown">${renderMarkdown(message.text || "")}</div>
+          `}
         </article>
       `).join("");
+      if (transcriptNeedsMath(messages)) {
+        ensureMathJax();
+      }
+      if (shouldStick) {
+        requestAnimationFrame(() => {
+          conversation.scrollTop = conversation.scrollHeight;
+          maybeTypesetMath().finally(() => {
+            requestAnimationFrame(() => {
+              conversation.scrollTop = conversation.scrollHeight;
+            });
+          });
+        });
+      } else {
+        requestAnimationFrame(() => {
+          maybeTypesetMath();
+        });
+      }
     }
 
-    function renderSessionDetail(detail) {
+    function renderSessionDetail(detail, forceStick = false) {
       const session = detail.session || {};
-      setStatus(`${session.title || session.id} - ${session.status || "unknown"} - ${session.updatedAt || ""}`);
-      renderConversation(detail);
+      sessionTitle.textContent = session.title || session.id || "Session";
+      sessionMeta.innerHTML = `
+        <details class="meta-details">
+          <summary class="meta-summary">Session details</summary>
+          <div class="detail-strip" style="margin-top:0.5rem; margin-bottom:0;">
+            <div class="detail-chip">
+              <span class="detail-chip-label">Status</span>
+              <span class="detail-chip-value">${escapeHtml(session.status || "unknown")}</span>
+            </div>
+            <div class="detail-chip">
+              <span class="detail-chip-label">Workspace</span>
+              <span class="detail-chip-value">${escapeHtml(session.cwd || "all workspaces")}</span>
+            </div>
+            <div class="detail-chip">
+              <span class="detail-chip-label">Updated</span>
+              <span class="detail-chip-value">${escapeHtml(session.updatedAt || "unknown")}</span>
+            </div>
+            <div class="detail-chip">
+              <span class="detail-chip-label">Thread</span>
+              <span class="detail-chip-value mono">${escapeHtml(session.id || "")}</span>
+            </div>
+          </div>
+        </details>
+      `;
+      renderConversation(detail, forceStick);
     }
 
     async function fetchJson(url, init) {
@@ -329,15 +1183,14 @@ INDEX_HTML = """<!doctype html>
         : "?limit=30";
       const data = await fetchJson(`/api/sessions${suffix}`);
       state.sessions = data.sessions || [];
-      if (!state.activeSessionId && state.sessions.length) {
-        state.activeSessionId = state.sessions[0].id;
+      if (state.sessions.length) {
+        state.activeSessionId = newestActiveSessionId();
       }
       renderSessions();
       if (state.activeSessionId) {
         await loadSession(state.activeSessionId);
-      } else {
-        setStatus("No session selected.");
       }
+      updateSessionCount();
       ensurePolling();
     }
 
@@ -354,19 +1207,20 @@ INDEX_HTML = """<!doctype html>
       state.activeSessionId = sessionId;
       ensureEventSource(sessionId);
       renderSessions();
+      sessionTitle.textContent = "Loading session...";
+      sessionMeta.innerHTML = "";
       promptInput.disabled = true;
       sendButton.disabled = true;
       reloadSessionButton.disabled = true;
-      setStatus("Loading session...");
       try {
         const detail = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
-        renderSessionDetail(detail);
+        renderSessionDetail(detail, true);
         promptInput.disabled = false;
         sendButton.disabled = false;
         reloadSessionButton.disabled = false;
       } catch (error) {
         conversation.innerHTML = "";
-        setStatus(error.message || String(error), true);
+        sessionTitle.textContent = error.message || String(error);
       }
     }
 
@@ -376,7 +1230,7 @@ INDEX_HTML = """<!doctype html>
       }
       try {
         const detail = await fetchJson(`/api/sessions/${encodeURIComponent(state.activeSessionId)}`);
-        renderSessionDetail(detail);
+        renderSessionDetail(detail, false);
       } catch {
         // Keep the currently rendered session if a transient refresh fails.
       }
@@ -393,7 +1247,8 @@ INDEX_HTML = """<!doctype html>
       }
       promptInput.disabled = true;
       sendButton.disabled = true;
-      setStatus("Sending prompt...");
+      sendButton.textContent = "…";
+      sessionTitle.textContent = "Sending...";
       try {
         const payload = await fetchJson(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/prompt`, {
           method: "POST",
@@ -401,13 +1256,13 @@ INDEX_HTML = """<!doctype html>
           body: JSON.stringify({ text }),
         });
         promptInput.value = "";
-        setStatus(`Prompt accepted. Turn ${payload.turnId || ""} is ${payload.status || "in progress"}.`);
         await loadSession(state.activeSessionId);
       } catch (error) {
-        setStatus(error.message || String(error), true);
+        sessionTitle.textContent = error.message || String(error);
       } finally {
         promptInput.disabled = false;
         sendButton.disabled = false;
+        sendButton.textContent = "↑";
       }
     }
 
@@ -420,17 +1275,21 @@ INDEX_HTML = """<!doctype html>
       }
       state.eventSourceSessionId = sessionId;
       state.eventSourceHealthy = false;
+      updateConnectionBadge();
       state.eventSource = new EventSource(`/api/events?sessionId=${encodeURIComponent(sessionId)}`);
       state.eventSource.onopen = () => {
         state.eventSourceHealthy = true;
+        updateConnectionBadge();
       };
       state.eventSource.addEventListener("notification", (event) => {
         state.eventSourceHealthy = true;
+        updateConnectionBadge();
         const payload = JSON.parse(event.data);
         handleLiveEvent(payload);
       });
       state.eventSource.onerror = () => {
         state.eventSourceHealthy = false;
+        updateConnectionBadge();
         // EventSource reconnects automatically; keep the UI usable while it does.
       };
     }
@@ -501,14 +1360,32 @@ INDEX_HTML = """<!doctype html>
     }
 
     document.getElementById("refreshButton").addEventListener("click", () => loadSessions());
+    searchInput.addEventListener("input", (event) => {
+      state.searchQuery = event.target.value || "";
+      renderSessions();
+    });
+    promptInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      if (sendButton.disabled) {
+        return;
+      }
+      document.getElementById("composer").requestSubmit();
+    });
     reloadSessionButton.addEventListener("click", () => {
       if (state.activeSessionId) {
         loadSession(state.activeSessionId);
       }
     });
     document.getElementById("composer").addEventListener("submit", sendPrompt);
+    window.addEventListener("redex-math-ready", () => maybeTypesetMath());
 
-    loadSessions().catch((error) => setStatus(error.message || String(error), true));
+    updateConnectionBadge();
+    loadSessions().catch((error) => {
+      sessionTitle.textContent = error.message || String(error);
+    });
   </script>
 </body>
 </html>

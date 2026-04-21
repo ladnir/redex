@@ -55,8 +55,8 @@ try {
 }
 
 if ($TailnetServe) {
-    & tailscale serve http / "http://127.0.0.1:$Port"
-    Write-Host "Published through Tailscale Serve to http://127.0.0.1:$Port"
+    & tailscale serve --bg --http 80 "http://127.0.0.1:$Port"
+    Write-Host "Published through Tailscale Serve on tailnet HTTP port 80 -> http://127.0.0.1:$Port"
 }
 
 if ($OpenBrowser) {
