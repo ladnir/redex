@@ -4,6 +4,9 @@
 
 Use Codex from your phone without giving up your desktop session.
 
+
+
+
 Redex is a lightweight web companion for Codex. It lets you open your chats in a phone-friendly UI, keep reading while you are away from your desk, and send real prompts back into the same live session.
 
 The goal is simple:
@@ -26,9 +29,7 @@ Redex is not trying to replace Codex. It is trying to make Codex feel portable.
 
 ## What It Looks Like
 
-| Desktop | Mobile |
-| --- | --- |
-| ![Redex desktop](assets/desktop.png) | ![Redex mobile](assets/mobile.jpg) |
+https://github.com/user-attachments/assets/469d8106-c67e-4e27-bac4-27c287bb471c
 
 ## Recommended Setup
 
