@@ -2,75 +2,149 @@
 
 # Redex
 
-`redex` is an external control surface for Codex desktop sessions.
+Use Codex from your phone without giving up your desktop session.
 
-It has three practical pieces:
+Redex is a lightweight web companion for Codex. It lets you open your chats in a phone-friendly UI, keep reading while you are away from your desk, and send real prompts back into the same live session.
 
-- read-only local inspection from `~/.codex`
-- live `listSessions`, `getSession`, and `sendPrompt(sessionId, text)` over the Codex app-server
-- browser live updates over a Redex SSE feed subscribed to the selected Codex session
+The goal is simple:
 
-The live path is the important one for phone access: it sends a real new user turn into an existing chat instead of abusing hooks.
+- keep Codex as the source of truth
+- make remote access feel natural
+- avoid hooky automation and fake chat relays
 
-Redex is intentionally outside Codex. Codex stays the local engine and session authority; Redex is the external app that talks to the Codex app-server.
+## Why Redex
 
-## Design Goal
+If you already like working in Codex on your computer, Redex gives you a second screen for the same work:
 
-The point of Redex is to keep Codex as close to upstream as possible.
+- pick up a live Codex session from your phone
+- watch turns arrive in near real time
+- reply into the same thread, not a copy
+- browse all your sessions in one place
+- expose it safely over your tailnet
 
-- Codex owns local session state and the existing app-server protocol.
-- Redex owns the external control surface, phone-friendly UI, and any remote networking story.
-- Any Codex-side changes should stay narrowly focused on exposing or stabilizing the existing local control plane, not reimplementing Redex inside Codex.
+Redex is not trying to replace Codex. It is trying to make Codex feel portable.
 
-## Install
+## What It Looks Like
+
+| Desktop | Mobile |
+| --- | --- |
+| ![Redex desktop](assets/desktop.png) | ![Redex mobile](assets/mobile.jpg) |
+
+## Recommended Setup
+
+For the best experience, use Redex with the Redex-compatible Codex fork:
+
+- Codex fork: [ladnir/codex `redex` branch](https://github.com/ladnir/codex/tree/redex)
+- Redex: [ladnir/redex](https://github.com/ladnir/redex)
+
+That setup gives you the important thing Redex wants most: both the Codex desktop app and Redex talking to the same live runtime.
+
+If you are not using the fork, Redex can still connect to a standalone Codex app-server over websocket, but that is the less integrated fallback.
+
+## Quick Start
+
+Install Redex:
 
 ```bash
 pip install -e .
 ```
 
-## Recommended Setup
-
-For full live bidirectional sync between Codex desktop and Redex, use the Redex-compatible Codex fork:
-
-- Codex fork: https://github.com/ladnir/codex/tree/redex
-- Redex: https://github.com/ladnir/redex
-
-This fork adds a small app-server change so the desktop-owned runtime can also be discovered over localhost by Redex.
-
-If you are not using the fork, Redex can still work against a standalone websocket app-server, but that is the less integrated fallback mode.
-
-## Quick Start
-
-Redex needs a live Codex app-server. There are two good ways to provide one:
-
-1. Preferred: a desktop-managed shared runtime that publishes discovery metadata at `~/.codex/runtime/app-server.json`
-2. Fallback: a standalone websocket app-server listening on `ws://127.0.0.1:4222`
-
-Once one of those exists, start the Redex web bridge:
+Start the web UI:
 
 ```bash
 python redex.py serve --host 127.0.0.1 --port 8765
 ```
 
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:8765/
 ```
 
-By default, Redex auto-discovers the live Codex desktop runtime from `~/.codex/runtime/app-server.json` and only falls back to `ws://127.0.0.1:4222` if no discovered runtime is available.
+By default, Redex will try to discover a live Codex desktop runtime from:
+
+```text
+~/.codex/runtime/app-server.json
+```
+
+If it does not find one, it falls back to:
+
+```text
+ws://127.0.0.1:4222
+```
+
+## Best Experience
+
+The nicest setup is:
+
+1. Codex desktop is running normally.
+2. The Codex fork exposes a localhost sidecar for that same runtime.
+3. Redex discovers it automatically.
+4. Your phone opens Redex over Tailscale.
+
+That gives you live desktop and phone access to the same session instead of juggling copies.
+
+## Phone Access
+
+Once Redex is running locally, the easiest way to get it on your phone is Tailscale.
+
+You can either bind Redex directly on the machine:
+
+```bash
+python redex.py serve --host 0.0.0.0 --port 8765
+```
+
+Or keep Redex on localhost and publish it through Tailscale Serve:
+
+```bash
+tailscale serve http / http://127.0.0.1:8765
+```
+
+## Windows Convenience Scripts
+
+This repo includes PowerShell launchers for the Windows flow:
+
+Launch Codex with the repo backend and Redex:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Start-Redex.ps1 -RestartCodex -OpenBrowser
+```
+
+Launch Codex with Redex and publish through Tailscale Serve:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Start-RedexTailnet.ps1 -RestartCodex
+```
+
+Switch only Codex into the repo-core setup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Start-CodexRepoCore.ps1 -Restart
+```
+
+## Developer Notes
+
+Redex is intentionally external to Codex.
+
+- Codex owns session state, runtime behavior, and the app-server protocol.
+- Redex owns the browser UI, phone flow, and remote access story.
+- The preferred Codex-side change is small: expose the desktop-owned runtime through a discoverable local sidecar.
+
+That keeps the fork small and makes Redex easier to evolve on its own.
 
 ## Runtime Models
 
+Redex supports two practical runtime shapes.
+
 ### Shared desktop runtime
 
-This is the cleanest model for phone access. The desktop Codex app owns the session runtime, and Redex connects to that same live instance through a localhost websocket sidecar.
+This is the preferred model.
 
-That requires a Codex build that:
+The desktop Codex app owns the runtime, and Redex connects to that same live instance through a localhost websocket sidecar. Discovery metadata is written to:
 
-- starts the app-server in its normal desktop-owned mode
-- also exposes a localhost websocket sidecar
-- writes discovery metadata to `~/.codex/runtime/app-server.json`
+```text
+~/.codex/runtime/app-server.json
+```
 
 ### Standalone websocket app-server
 
@@ -81,57 +155,29 @@ cd /path/to/codex/codex-rs
 target/debug/codex app-server --listen ws://127.0.0.1:4222
 ```
 
-Or point Redex at another websocket endpoint explicitly with `--app-server-url`.
-
-## Windows Convenience Scripts
-
-This repo includes PowerShell launchers for the Windows setup described above.
-
-Launch Codex with the repo backend plus the Redex web bridge:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Start-Redex.ps1 -RestartCodex -OpenBrowser
-```
-
-This script:
-
-- launches the Windows Codex UI against the repo-built `codex.exe`
-- enables the shared localhost websocket sidecar on the desktop-owned runtime
-- starts Redex at `http://127.0.0.1:8765`
-
-To publish the same local Redex instance to your tailnet with Tailscale Serve:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Start-RedexTailnet.ps1 -RestartCodex
-```
-
-If you only want to switch Codex itself:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Start-CodexRepoCore.ps1 -Restart
-```
+You can also point Redex at another websocket endpoint with `--app-server-url`.
 
 ## CLI
 
-List live sessions for the current workspace:
+List sessions:
 
 ```bash
 python redex.py list-sessions --cwd "/path/to/workspace"
 ```
 
-Read one session:
+Read a session:
 
 ```bash
 python redex.py get-session 019dad2c-8c96-7dd3-9d8d-5ffa372881dd
 ```
 
-Send a real prompt into an existing session:
+Send a prompt into an existing session:
 
 ```bash
 python redex.py send-prompt 019dad2c-8c96-7dd3-9d8d-5ffa372881dd "what should we do next?"
 ```
 
-The old read-only local transcript tools still exist too:
+The older local transcript helpers still exist too:
 
 ```bash
 python redex.py threads
@@ -141,56 +187,19 @@ python redex.py watch latest
 
 ## HTTP Bridge
 
-Run the phone-friendly local web bridge:
+Run the local web bridge:
 
 ```bash
 python redex.py serve --host 127.0.0.1 --port 8765
 ```
 
-By default, `serve` shows sessions from all workspaces. If you want to filter to one workspace, pass `--cwd`:
-
-```bash
-python redex.py serve --cwd "/path/to/workspace"
-```
-
-Useful JSON endpoints:
+Useful endpoints:
 
 - `GET /healthz`
 - `GET /api/sessions?limit=30`
 - `GET /api/sessions/:id`
 - `POST /api/sessions/:id/prompt` with body `{"text":"..."}`
-
-Live browser updates use:
-
 - `GET /api/events?sessionId=:id`
-
-The browser subscribes to the selected session and refreshes that transcript when Codex emits relevant thread, turn, or item notifications.
-
-## Phone Access Over Tailscale
-
-Once Redex is running locally, the easy next step is to expose it to the phone over your tailnet.
-
-Direct tailnet access:
-
-```bash
-python redex.py serve --host 0.0.0.0 --port 8765
-```
-
-Then on the phone, with Tailscale enabled, open the machine's Tailscale IP on port `8765`.
-
-Or keep Redex bound to localhost and publish it through Tailscale Serve:
-
-```bash
-tailscale serve http / http://127.0.0.1:8765
-```
-
-## Notes
-
-- The Codex app-server rejects websocket clients that send an `Origin` header, so Redex suppresses `Origin` on connect.
-- On Windows, Redex validates discovered PIDs with the Win32 process API instead of `os.kill(pid, 0)`.
-- The live prompt path uses `thread/resume` plus `turn/start`.
-- The live event path uses a long-lived Redex connection and `thread/resume` to subscribe to the selected session.
-- `sendPrompt` is currently fire-and-return: it accepts the turn and returns the new turn id immediately. The browser page can then refresh the session to watch the assistant finish.
 
 ## Compatibility
 
