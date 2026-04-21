@@ -110,6 +110,43 @@ def _extract_text_chunks(chunks: list[dict[str, Any]]) -> str:
     return "\n\n".join(part for part in parts if part).strip()
 
 
+def _sandbox_mode_from_policy(policy: Any) -> str | None:
+    if isinstance(policy, str):
+        if policy == "dangerFullAccess":
+            return "danger-full-access"
+        if policy == "workspaceWrite":
+            return "workspace-write"
+        if policy == "readOnly":
+            return "read-only"
+        return policy
+    if not isinstance(policy, dict):
+        return None
+    policy_type = policy.get("type")
+    if not isinstance(policy_type, str):
+        return None
+    if policy_type == "dangerFullAccess":
+        return "danger-full-access"
+    if policy_type == "workspaceWrite":
+        return "workspace-write"
+    if policy_type == "readOnly":
+        return "read-only"
+    return None
+
+
+def _error_text(error: Exception) -> str:
+    return str(error).lower()
+
+
+def _is_pre_first_turn_error(error: Exception) -> bool:
+    text = _error_text(error)
+    return (
+        "not materialized yet" in text
+        or "includeTurns is unavailable before first user message".lower() in text
+        or "no rollout found" in text
+        or "rollout is empty" in text
+    )
+
+
 @lru_cache(maxsize=512)
 def _workspace_group_for_cwd(cwd: str | None) -> tuple[str | None, str | None]:
     if not cwd:
@@ -377,6 +414,43 @@ class CodexAppServerClient:
             },
         )
 
+    def create_session(self, *, cwd: str | None = None, template_session_id: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "model": None,
+            "modelProvider": None,
+            "cwd": cwd,
+            "approvalPolicy": None,
+            "approvalsReviewer": None,
+            "sandbox": None,
+            "config": None,
+            "ephemeral": False,
+            "sessionStartSource": None,
+            "persistExtendedHistory": True,
+            "baseInstructions": None,
+            "developerInstructions": None,
+            "personality": None,
+        }
+        if template_session_id:
+            template = self.resume_session(template_session_id)
+            params.update(
+                {
+                    "model": template.get("model"),
+                    "modelProvider": template.get("modelProvider"),
+                    "approvalPolicy": template.get("approvalPolicy"),
+                    "approvalsReviewer": template.get("approvalsReviewer"),
+                    "sandbox": _sandbox_mode_from_policy(template.get("sandbox")),
+                    "config": template.get("config"),
+                    "baseInstructions": template.get("baseInstructions"),
+                    "developerInstructions": template.get("developerInstructions"),
+                    "personality": template.get("personality"),
+                }
+            )
+            if not cwd:
+                template_cwd = template.get("cwd")
+                if isinstance(template_cwd, str) and template_cwd:
+                    params["cwd"] = template_cwd
+        return self._request("thread/start", params)
+
     def resume_session(self, session_id: str) -> dict[str, Any]:
         return self._request(
             "thread/resume",
@@ -400,7 +474,11 @@ class CodexAppServerClient:
         )
 
     def send_prompt(self, session_id: str, text: str) -> dict[str, Any]:
-        self.resume_session(session_id)
+        try:
+            self.resume_session(session_id)
+        except CodexAppServerError as exc:
+            if not _is_pre_first_turn_error(exc):
+                raise
         return self._request(
             "turn/start",
             {

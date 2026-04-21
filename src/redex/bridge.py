@@ -16,8 +16,10 @@ from urllib.parse import urlparse
 from .app_server import CodexAppServerClient
 from .app_server import CodexAppServerError
 from .app_server import CodexAppServerUnavailable
+from .app_server import _is_pre_first_turn_error
 from .app_server import make_session_detail_payload
 from .app_server import make_session_list_payload
+from .app_server import normalize_thread
 
 
 EVENT_BACKLOG_LIMIT = 500
@@ -228,6 +230,10 @@ INDEX_HTML = """<!doctype html>
       background: rgba(68, 99, 132, 0.72);
       box-shadow: 0 0 0 0.35rem rgba(127, 176, 222, 0.12);
     }
+    .session-card.unseen {
+      border-color: rgba(180, 221, 255, 0.42);
+      box-shadow: inset 0 0 0 1px rgba(180, 221, 255, 0.16);
+    }
     .session-card-title {
       display: flex;
       align-items: start;
@@ -312,6 +318,27 @@ INDEX_HTML = """<!doctype html>
       align-items: center;
       flex-wrap: wrap;
     }
+    .group-heading-line {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-width: 0;
+    }
+    .unseen-dot {
+      width: 0.52rem;
+      height: 0.52rem;
+      border-radius: 999px;
+      background: #dcecff;
+      box-shadow: 0 0 0.55rem rgba(220, 236, 255, 0.68);
+      flex: 0 0 auto;
+      margin-top: 0.18rem;
+    }
+    .unseen-pill {
+      background: rgba(220, 236, 255, 0.16);
+      border-color: rgba(220, 236, 255, 0.28);
+      color: var(--ink);
+      font-weight: 700;
+    }
     .group-collapse {
       padding: 0.34rem 0.64rem;
       border-radius: 999px;
@@ -320,7 +347,25 @@ INDEX_HTML = """<!doctype html>
       box-shadow: none;
       font-size: 0.78rem;
     }
+    .group-create {
+      width: 1.9rem;
+      height: 1.9rem;
+      min-width: 1.9rem;
+      padding: 0;
+      border-radius: 999px;
+      background: rgba(55, 80, 108, 0.86);
+      color: var(--ink);
+      box-shadow: none;
+      font-size: 1rem;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
     .group-collapse:hover:not(:disabled) {
+      background: rgba(75, 106, 140, 0.92);
+    }
+    .group-create:hover:not(:disabled) {
       background: rgba(75, 106, 140, 0.92);
     }
     .status-pill,
@@ -748,6 +793,9 @@ INDEX_HTML = """<!doctype html>
     const state = {
       sessions: [],
       activeSessionId: null,
+      draftSession: null,
+      initialSelectionDone: false,
+      unseenSessionIds: {},
       defaultCwd: "__DEFAULT_CWD__",
       searchQuery: "",
       expandedGroups: {},
@@ -794,6 +842,10 @@ INDEX_HTML = """<!doctype html>
         return "";
       }
       return String(id).slice(0, 8);
+    }
+
+    function sessionGroupKey(session) {
+      return session.workspaceGroup || session.cwd || "all-workspaces";
     }
 
     function sessionStatusClass(status) {
@@ -862,6 +914,45 @@ INDEX_HTML = """<!doctype html>
       }
       const sorted = [...sessions].sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || ""));
       return sorted[0]?.id || null;
+    }
+
+    function sessionsInGroup(groupKey) {
+      return state.sessions
+        .filter((session) => sessionGroupKey(session) === groupKey)
+        .sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || ""));
+    }
+
+    function preferredNewSessionCwd(groupKey) {
+      const sessions = sessionsInGroup(groupKey);
+      const active = sessions.find((session) => session.id === state.activeSessionId);
+      if (active && active.cwd) {
+        return active.cwd;
+      }
+      if (sessions.length && sessions[0].cwd) {
+        return sessions[0].cwd;
+      }
+      if (state.defaultCwd && state.defaultCwd !== "all workspaces") {
+        return state.defaultCwd;
+      }
+      return null;
+    }
+
+    function preferredTemplateSessionId(groupKey) {
+      const sessions = sessionsInGroup(groupKey);
+      const active = sessions.find((session) => session.id === state.activeSessionId);
+      return active?.id || sessions[0]?.id || state.activeSessionId || null;
+    }
+
+    function draftSessionForGroup(groupKey) {
+      if (!state.draftSession || state.draftSession.groupKey !== groupKey) {
+        return null;
+      }
+      return {
+        id: "__draft__",
+        title: "New chat",
+        preview: "Send the first prompt to create this chat.",
+        isDraft: true,
+      };
     }
 
     function sessionsForGroup(group) {
@@ -1021,6 +1112,46 @@ INDEX_HTML = """<!doctype html>
       sessionCount.textContent = `${count} session${count === 1 ? "" : "s"}`;
     }
 
+    function sessionIndexById(sessions) {
+      const index = new Map();
+      for (const session of sessions || []) {
+        if (session && session.id) {
+          index.set(session.id, session);
+        }
+      }
+      return index;
+    }
+
+    function noteBackgroundSessionChanges(previousSessions, nextSessions) {
+      const previousById = sessionIndexById(previousSessions);
+      for (const session of nextSessions || []) {
+        if (!session || !session.id || session.id === state.activeSessionId) {
+          continue;
+        }
+        const previous = previousById.get(session.id);
+        const isNewSession = !previous;
+        const changed = previous && (
+          (previous.updatedAt || "") !== (session.updatedAt || "") ||
+          (previous.preview || "") !== (session.preview || "") ||
+          (previous.status || "") !== (session.status || "") ||
+          (previous.title || "") !== (session.title || "")
+        );
+        if (isNewSession || changed) {
+          state.unseenSessionIds[session.id] = true;
+        }
+      }
+    }
+
+    function unseenCountForGroup(groupKey) {
+      let count = 0;
+      for (const session of sessionsInGroup(groupKey)) {
+        if (session && session.id && state.unseenSessionIds[session.id]) {
+          count += 1;
+        }
+      }
+      return count;
+    }
+
     function renderSessions() {
       const groups = groupedSessions();
       updateSessionCount();
@@ -1029,28 +1160,44 @@ INDEX_HTML = """<!doctype html>
         return;
       }
       sessionList.innerHTML = groups.map((group) => {
-        const visibleGroupSessions = sessionsForGroup(group);
-        const hiddenCount = Math.max(0, group.sessions.length - visibleGroupSessions.length);
+        const baseVisibleSessions = sessionsForGroup(group);
+        const groupDraft = draftSessionForGroup(group.key);
+        const visibleGroupSessions = groupDraft ? [groupDraft, ...baseVisibleSessions] : baseVisibleSessions;
+        const hiddenCount = Math.max(0, group.sessions.length - baseVisibleSessions.length);
         const isCollapsed = !!state.collapsedGroups[group.key];
+        const unseenCount = unseenCountForGroup(group.key);
         return `
           <section class="session-group">
             <div class="session-group-header">
               <div>
-                <div class="session-group-title">${escapeHtml(group.label)}</div>
+                <div class="group-heading-line">
+                  ${unseenCount ? '<span class="unseen-dot" aria-hidden="true"></span>' : ""}
+                  <div class="session-group-title">${escapeHtml(group.label)}</div>
+                  ${unseenCount ? `<span class="mini-pill unseen-pill">${escapeHtml(String(unseenCount))}</span>` : ""}
+                </div>
                 <div class="session-group-subtitle">${escapeHtml(group.subtitle)}</div>
               </div>
               <div class="group-header-actions">
+                <button class="group-create secondary" type="button" data-group-create="${escapeHtml(group.key)}" aria-label="Create chat in ${escapeHtml(group.label)}" title="Create chat">+</button>
                 <span class="mini-pill">${escapeHtml(String(group.sessions.length))}</span>
                 <button class="group-collapse secondary" type="button" data-group-collapse="${escapeHtml(group.key)}">${isCollapsed ? "Expand" : "Collapse"}</button>
               </div>
             </div>
             ${isCollapsed ? "" : visibleGroupSessions.map((session) => {
-              const activeClass = session.id === state.activeSessionId ? "active" : "";
+              const isUnseen = !!(session.id && state.unseenSessionIds[session.id]);
+              const activeClass = session.isDraft
+                ? (!state.activeSessionId && state.draftSession?.groupKey === group.key ? "active" : "")
+                : (session.id === state.activeSessionId ? "active" : "");
               return `
-                <button class="session-card ${activeClass}" type="button" data-session-id="${session.id}">
+                <button class="session-card ${activeClass} ${isUnseen ? "unseen" : ""}" type="button" ${session.isDraft ? `data-draft-group="${escapeHtml(group.key)}"` : `data-session-id="${session.id}"`}>
                   <div class="session-card-title">
                     <strong>${escapeHtml(session.title || session.id)}</strong>
-                    <span class="session-id">${escapeHtml(shortId(session.id))}</span>
+                    ${session.isDraft ? "" : `
+                      <span style="display:flex; align-items:center; gap:0.38rem;">
+                        ${isUnseen ? '<span class="unseen-dot" aria-hidden="true"></span>' : ""}
+                        <span class="session-id">${escapeHtml(shortId(session.id))}</span>
+                      </span>
+                    `}
                   </div>
                   <div class="preview">${escapeHtml(session.preview || "")}</div>
                 </button>
@@ -1063,6 +1210,12 @@ INDEX_HTML = """<!doctype html>
       }).join("");
       for (const element of sessionList.querySelectorAll("[data-session-id]")) {
         element.addEventListener("click", () => loadSession(element.dataset.sessionId));
+      }
+      for (const element of sessionList.querySelectorAll("[data-draft-group]")) {
+        element.addEventListener("click", () => createSession(element.dataset.draftGroup));
+      }
+      for (const element of sessionList.querySelectorAll("[data-group-create]")) {
+        element.addEventListener("click", () => createSession(element.dataset.groupCreate, element));
       }
       for (const element of sessionList.querySelectorAll("[data-group-collapse]")) {
         element.addEventListener("click", () => {
@@ -1168,6 +1321,29 @@ INDEX_HTML = """<!doctype html>
       renderConversation(detail, forceStick);
     }
 
+    function renderDraftSession() {
+      const draft = state.draftSession;
+      sessionTitle.textContent = "New chat";
+      sessionMeta.innerHTML = draft ? `
+        <details class="meta-details">
+          <summary class="meta-summary">Session details</summary>
+          <div class="detail-strip" style="margin-top:0.5rem; margin-bottom:0;">
+            <div class="detail-chip">
+              <span class="detail-chip-label">Workspace</span>
+              <span class="detail-chip-value">${escapeHtml(draft.cwd || "all workspaces")}</span>
+            </div>
+          </div>
+        </details>
+      ` : "";
+      conversation.innerHTML = '<div class="empty empty-state">Send the first prompt to create this chat.</div>';
+      promptInput.disabled = false;
+      sendButton.disabled = false;
+      reloadSessionButton.disabled = true;
+      requestAnimationFrame(() => {
+        promptInput.focus();
+      });
+    }
+
     async function fetchJson(url, init) {
       const response = await fetch(url, init);
       const data = await response.json().catch(() => ({}));
@@ -1182,12 +1358,26 @@ INDEX_HTML = """<!doctype html>
         ? `?cwd=${encodeURIComponent(state.defaultCwd)}&limit=30`
         : "?limit=30";
       const data = await fetchJson(`/api/sessions${suffix}`);
+      const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
-      if (state.sessions.length) {
-        state.activeSessionId = newestActiveSessionId();
+      if (!state.draftSession) {
+        if (state.initialSelectionDone) {
+          const stillActive = state.activeSessionId && state.sessions.some((session) => session.id === state.activeSessionId);
+          if (!stillActive) {
+            state.activeSessionId = state.sessions.length ? newestActiveSessionId() : null;
+          }
+        } else if (state.sessions.length) {
+          state.activeSessionId = newestActiveSessionId();
+        }
       }
+      if (state.initialSelectionDone) {
+        noteBackgroundSessionChanges(previousSessions, state.sessions);
+      }
+      state.initialSelectionDone = true;
       renderSessions();
-      if (state.activeSessionId) {
+      if (state.draftSession) {
+        renderDraftSession();
+      } else if (state.activeSessionId) {
         await loadSession(state.activeSessionId);
       }
       updateSessionCount();
@@ -1199,12 +1389,21 @@ INDEX_HTML = """<!doctype html>
         ? `?cwd=${encodeURIComponent(state.defaultCwd)}&limit=30`
         : "?limit=30";
       const data = await fetchJson(`/api/sessions${suffix}`);
+      const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
+      noteBackgroundSessionChanges(previousSessions, state.sessions);
+      if (state.activeSessionId && !state.sessions.some((session) => session.id === state.activeSessionId)) {
+        state.activeSessionId = state.sessions.length ? newestActiveSessionId() : null;
+      }
       renderSessions();
     }
 
     async function loadSession(sessionId) {
+      state.draftSession = null;
       state.activeSessionId = sessionId;
+      if (sessionId) {
+        delete state.unseenSessionIds[sessionId];
+      }
       ensureEventSource(sessionId);
       renderSessions();
       sessionTitle.textContent = "Loading session...";
@@ -1238,7 +1437,7 @@ INDEX_HTML = """<!doctype html>
 
     async function sendPrompt(event) {
       event.preventDefault();
-      if (!state.activeSessionId) {
+      if (!state.activeSessionId && !state.draftSession) {
         return;
       }
       const text = promptInput.value.trim();
@@ -1248,15 +1447,35 @@ INDEX_HTML = """<!doctype html>
       promptInput.disabled = true;
       sendButton.disabled = true;
       sendButton.textContent = "…";
-      sessionTitle.textContent = "Sending...";
+      sessionTitle.textContent = state.activeSessionId ? "Sending..." : "Starting chat...";
       try {
-        const payload = await fetchJson(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/prompt`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
-        });
-        promptInput.value = "";
-        await loadSession(state.activeSessionId);
+        let sessionId = state.activeSessionId;
+        if (!sessionId && state.draftSession) {
+          const payload = await fetchJson("/api/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              cwd: state.draftSession.cwd,
+              templateSessionId: state.draftSession.templateSessionId,
+              text,
+            }),
+          });
+          promptInput.value = "";
+          await refreshSessionListOnly();
+          sessionId = payload.session?.id || null;
+          if (!sessionId) {
+            throw new Error("New chat did not return a session id.");
+          }
+          state.draftSession = null;
+        } else {
+          await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          promptInput.value = "";
+        }
+        await loadSession(sessionId);
       } catch (error) {
         sessionTitle.textContent = error.message || String(error);
       } finally {
@@ -1266,7 +1485,32 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    function createSession(groupKey, buttonElement = null) {
+      if (!groupKey) {
+        return;
+      }
+      state.draftSession = {
+        groupKey,
+        cwd: preferredNewSessionCwd(groupKey),
+        templateSessionId: preferredTemplateSessionId(groupKey),
+      };
+      state.activeSessionId = null;
+      ensureEventSource(null);
+      renderSessions();
+      renderDraftSession();
+    }
+
     function ensureEventSource(sessionId) {
+      if (!sessionId) {
+        if (state.eventSource) {
+          state.eventSource.close();
+          state.eventSource = null;
+        }
+        state.eventSourceSessionId = null;
+        state.eventSourceHealthy = false;
+        updateConnectionBadge();
+        return;
+      }
       if (state.eventSource && state.eventSourceSessionId === sessionId) {
         return;
       }
@@ -1318,7 +1562,7 @@ INDEX_HTML = """<!doctype html>
       }
       const threadId = eventThreadId(payload);
       const affectsActive = threadId && threadId === state.activeSessionId;
-      if (method.startsWith("thread/")) {
+      if (method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/")) {
         scheduleSessionListReload();
       }
       if (affectsActive && (method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/"))) {
@@ -1345,17 +1589,17 @@ INDEX_HTML = """<!doctype html>
     function ensurePolling() {
       if (!state.activePollTimer) {
         state.activePollTimer = setInterval(() => {
-          if (!document.hidden && !state.eventSourceHealthy) {
+          if (!document.hidden) {
             refreshActiveSessionSilently();
           }
         }, 1500);
       }
       if (!state.sessionPollTimer) {
         state.sessionPollTimer = setInterval(() => {
-          if (!document.hidden && !state.eventSourceHealthy) {
+          if (!document.hidden) {
             refreshSessionListOnly().catch(() => {});
           }
-        }, 5000);
+        }, 2500);
       }
     }
 
@@ -1514,6 +1758,33 @@ class RedexHttpServer(ThreadingHTTPServer):
 class RedexHandler(BaseHTTPRequestHandler):
     server: RedexHttpServer
 
+    def _read_session_detail_with_retry(self, session_id: str) -> dict[str, Any]:
+        last_error: CodexAppServerError | None = None
+        for attempt in range(6):
+            try:
+                with self._client() as client:
+                    try:
+                        return client.get_session(session_id, include_turns=True)
+                    except CodexAppServerError as exc:
+                        if not _is_pre_first_turn_error(exc):
+                            raise
+                        last_error = exc
+                        try:
+                            return client.get_session(session_id, include_turns=False)
+                        except CodexAppServerError as fallback_exc:
+                            if not _is_pre_first_turn_error(fallback_exc):
+                                raise
+                            last_error = fallback_exc
+            except CodexAppServerError as exc:
+                if not _is_pre_first_turn_error(exc):
+                    raise
+                last_error = exc
+            if attempt < 5:
+                time.sleep(0.15)
+        if last_error is not None:
+            raise last_error
+        raise CodexAppServerError(f"thread/read failed for {session_id}")
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_cors_headers()
@@ -1541,6 +1812,9 @@ class RedexHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/sessions":
+            self._handle_create_session()
+            return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/prompt"):
             prefix = "/api/sessions/"
             session_id = parsed.path[len(prefix) : -len("/prompt")]
@@ -1622,12 +1896,68 @@ class RedexHandler(BaseHTTPRequestHandler):
 
     def _handle_get_session(self, session_id: str) -> None:
         try:
-            with self._client() as client:
-                result = client.get_session(session_id, include_turns=True)
+            result = self._read_session_detail_with_retry(session_id)
         except CodexAppServerError as exc:
             self._send_error_json(exc)
             return
         self._send_json(HTTPStatus.OK, make_session_detail_payload(result))
+
+    def _handle_create_session(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        cwd = payload.get("cwd")
+        if cwd is not None and not isinstance(cwd, str):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`cwd` must be a string when provided."})
+            return
+        if not cwd:
+            cwd = self.server.config.default_cwd
+        if cwd == "all workspaces":
+            cwd = None
+        template_session_id = payload.get("templateSessionId")
+        if template_session_id is not None and not isinstance(template_session_id, str):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "`templateSessionId` must be a string when provided."},
+            )
+            return
+        text = payload.get("text")
+        if text is not None:
+            if not isinstance(text, str) or not text.strip():
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "`text` must be a non-empty string when provided."},
+                )
+                return
+        try:
+            with self._client() as client:
+                result = client.create_session(cwd=cwd, template_session_id=template_session_id)
+                thread = result.get("thread")
+                if not isinstance(thread, dict):
+                    self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "thread/start response did not include a thread."})
+                    return
+                turn_id = None
+                status = None
+                if text is not None:
+                    send_result = client.send_prompt(str(thread.get("id")), text.strip())
+                    turn = send_result.get("turn")
+                    if isinstance(turn, dict):
+                        turn_id = turn.get("id")
+                        status = turn.get("status")
+        except CodexAppServerError as exc:
+            self._send_error_json(exc)
+            return
+        self._send_json(
+            HTTPStatus.CREATED,
+            {
+                "ok": True,
+                "session": normalize_thread(thread),
+                "turnId": turn_id,
+                "status": status,
+            },
+        )
 
     def _handle_send_prompt(self, session_id: str) -> None:
         try:
