@@ -26,9 +26,53 @@ The point of Redex is to keep Codex as close to upstream as possible.
 pip install -e .
 ```
 
-## Recommended Startup
+## Quick Start
 
-For the shared-runtime setup, let the Windows Codex app start the repo backend, then have Redex auto-discover that live runtime.
+Redex needs a live Codex app-server. There are two good ways to provide one:
+
+1. Preferred: a desktop-managed shared runtime that publishes discovery metadata at `~/.codex/runtime/app-server.json`
+2. Fallback: a standalone websocket app-server listening on `ws://127.0.0.1:4222`
+
+Once one of those exists, start the Redex web bridge:
+
+```bash
+python redex.py serve --host 127.0.0.1 --port 8765
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765/
+```
+
+By default, Redex auto-discovers the live Codex desktop runtime from `~/.codex/runtime/app-server.json` and only falls back to `ws://127.0.0.1:4222` if no discovered runtime is available.
+
+## Runtime Models
+
+### Shared desktop runtime
+
+This is the cleanest model for phone access. The desktop Codex app owns the session runtime, and Redex connects to that same live instance through a localhost websocket sidecar.
+
+That requires a Codex build that:
+
+- starts the app-server in its normal desktop-owned mode
+- also exposes a localhost websocket sidecar
+- writes discovery metadata to `~/.codex/runtime/app-server.json`
+
+### Standalone websocket app-server
+
+If you are not using the shared-runtime Codex patch yet, Redex can also talk to a separate Codex app-server process:
+
+```bash
+cd /path/to/codex/codex-rs
+target/debug/codex app-server --listen ws://127.0.0.1:4222
+```
+
+Or point Redex at another websocket endpoint explicitly with `--app-server-url`.
+
+## Windows Convenience Scripts
+
+This repo includes PowerShell launchers for the Windows setup described above.
 
 Launch Codex with the repo backend plus the Redex web bridge:
 
@@ -36,7 +80,7 @@ Launch Codex with the repo backend plus the Redex web bridge:
 powershell -ExecutionPolicy Bypass -File .\scripts\Start-Redex.ps1 -RestartCodex -OpenBrowser
 ```
 
-This does three things:
+This script:
 
 - launches the Windows Codex UI against the repo-built `codex.exe`
 - enables the shared localhost websocket sidecar on the desktop-owned runtime
@@ -59,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Start-CodexRepoCore.ps1 -Rest
 List live sessions for the current workspace:
 
 ```bash
-python redex.py list-sessions --cwd "C:\Users\peter\repo\redex"
+python redex.py list-sessions --cwd "/path/to/workspace"
 ```
 
 Read one session:
@@ -90,18 +134,10 @@ Run the phone-friendly local web bridge:
 python redex.py serve --host 127.0.0.1 --port 8765
 ```
 
-By default Redex auto-discovers the live Codex desktop runtime from `~/.codex/runtime/app-server.json` and only falls back to `ws://127.0.0.1:4222` if no discovered runtime is available.
-
 By default, `serve` shows sessions from all workspaces. If you want to filter to one workspace, pass `--cwd`:
 
 ```bash
-python redex.py serve --cwd "C:\Users\peter\repo\redex"
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8765/
+python redex.py serve --cwd "/path/to/workspace"
 ```
 
 Useful JSON endpoints:
