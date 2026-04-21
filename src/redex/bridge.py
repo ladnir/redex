@@ -29,6 +29,67 @@ EVENT_BACKLOG_LIMIT = 500
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 DEFAULT_TURN_PAGE_LIMIT = 40
 MAX_TURN_PAGE_LIMIT = 100
+MANIFEST_JSON = json.dumps(
+    {
+        "name": "Redex",
+        "short_name": "Redex",
+        "description": "Continue live Codex chats from your phone.",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#122133",
+        "theme_color": "#122133",
+        "icons": [
+            {
+                "src": "/assets/redex-mark.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any maskable",
+            }
+        ],
+    },
+    indent=2,
+)
+SERVICE_WORKER_JS = """const CACHE_NAME = "redex-shell-v1";
+const SHELL_URLS = ["/", "/manifest.webmanifest", "/assets/redex-mark.svg"];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_URLS)));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
+    ),
+  );
+  self.clients.claim();
+});
+
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  if (request.method !== "GET") {
+    return;
+  }
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+  if (url.pathname.startsWith("/api/") || url.pathname === "/api/events") {
+    return;
+  }
+  event.respondWith(
+    fetch(request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+        return response;
+      })
+      .catch(() => caches.match(request).then((cached) => cached || caches.match("/"))),
+  );
+});
+"""
 
 
 INDEX_HTML = """<!doctype html>
@@ -37,10 +98,17 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#122133">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Redex">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/assets/redex-mark.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/redex-mark.svg">
   <title>Redex</title>
   <style>
     :root {
       color-scheme: dark;
+      --redex-app-height: 100vh;
       --bg: #122133;
       --panel: rgba(24, 38, 56, 0.96);
       --panel-strong: rgba(31, 47, 68, 0.99);
@@ -70,14 +138,19 @@ INDEX_HTML = """<!doctype html>
         radial-gradient(circle at top right, rgba(90, 130, 171, 0.16), transparent 20rem),
         linear-gradient(180deg, rgba(180, 212, 245, 0.1), transparent 24rem),
         linear-gradient(180deg, #172739 0%, #122133 100%);
+      min-height: 100vh;
+      overscroll-behavior-y: none;
     }
     .app {
-      min-height: 100vh;
+      min-height: 0;
       max-width: 88rem;
       margin: 0 auto;
-      padding: 1.1rem;
+      padding:
+        calc(env(safe-area-inset-top, 0px) + 0.72rem)
+        0.82rem
+        calc(env(safe-area-inset-bottom, 0px) + 0.82rem);
       display: grid;
-      gap: 1.1rem;
+      gap: 0.82rem;
     }
     .panel {
       background: var(--panel);
@@ -87,13 +160,22 @@ INDEX_HTML = """<!doctype html>
       backdrop-filter: blur(14px);
     }
     .hero {
-      padding: 0.85rem 1rem;
+      padding: 0.68rem 0.82rem;
+      position: sticky;
+      top: 0;
+      z-index: 30;
     }
     .hero-grid {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
+    }
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      flex: 0 0 auto;
     }
     .hero-copy {
       display: flex;
@@ -146,6 +228,47 @@ INDEX_HTML = """<!doctype html>
       font-size: 0.84rem;
       font-weight: 700;
     }
+    button.mobile-only {
+      display: none;
+    }
+    .install-button {
+      padding: 0.48rem 0.82rem;
+      border-radius: 999px;
+      font-size: 0.84rem;
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .mobile-sidebar-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(6, 10, 16, 0.54);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 160ms ease;
+      z-index: 45;
+    }
+    .layout-debug {
+      position: fixed;
+      left: 0.7rem;
+      top: calc(env(safe-area-inset-top, 0px) + 5rem);
+      z-index: 120;
+      max-width: min(24rem, calc(100vw - 1.4rem));
+      padding: 0.72rem 0.8rem;
+      border-radius: 0.85rem;
+      border: 1px solid rgba(255, 214, 102, 0.42);
+      background: rgba(24, 16, 6, 0.96);
+      color: #f8fbff;
+      box-shadow: 0 1rem 2.2rem rgba(0, 0, 0, 0.4);
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.8rem;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      pointer-events: auto;
+      display: none;
+    }
+    .layout-debug.visible {
+      display: block;
+    }
     .layout {
       display: grid;
       gap: 1rem;
@@ -153,7 +276,7 @@ INDEX_HTML = """<!doctype html>
     }
     .sidebar,
     .session {
-      padding: 1rem;
+      padding: 0.82rem;
       min-width: 0;
     }
     .sidebar {
@@ -171,7 +294,25 @@ INDEX_HTML = """<!doctype html>
       gap: 0.5rem;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 0.9rem;
+      margin-bottom: 0.72rem;
+    }
+    .session-heading {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+    .session-heading h2 {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-heading-meta {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
     }
     .sidebar-copy h2,
     .session-heading h2 {
@@ -232,10 +373,10 @@ INDEX_HTML = """<!doctype html>
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 0.95rem;
-      padding: 0.8rem 0.9rem;
+      padding: 0.72rem 0.82rem;
       background: rgba(47, 69, 94, 0.88);
       color: var(--ink);
-      margin-bottom: 0.85rem;
+      margin-bottom: 0.72rem;
     }
     .search::placeholder,
     textarea::placeholder {
@@ -490,6 +631,43 @@ INDEX_HTML = """<!doctype html>
       min-width: 0;
       padding-bottom: 0.4rem;
     }
+    .conversation-shell {
+      position: relative;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .scroll-end-button {
+      position: absolute;
+      right: 0.5rem;
+      bottom: 0.65rem;
+      z-index: 3;
+      width: 2.4rem;
+      height: 2.4rem;
+      min-width: 2.4rem;
+      padding: 0;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+      line-height: 1;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(0.35rem);
+      transition: opacity 120ms ease, transform 120ms ease, background 120ms ease;
+      background: rgba(30, 47, 70, 0.94);
+      box-shadow: 0 10px 28px rgba(5, 10, 18, 0.28);
+      backdrop-filter: blur(10px);
+    }
+    .scroll-end-button.visible {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+    .scroll-end-button:hover:not(:disabled) {
+      background: rgba(48, 72, 103, 0.98);
+    }
     .history-loader {
       display: flex;
       justify-content: center;
@@ -559,18 +737,16 @@ INDEX_HTML = """<!doctype html>
     .commentary-body {
       margin-top: 0.32rem;
     }
-    .meta-details {
-      margin-bottom: 0.65rem;
-    }
     .meta-summary {
       display: inline-flex;
       align-items: center;
-      gap: 0.45rem;
+      gap: 0.28rem;
       cursor: pointer;
       color: var(--muted);
       font-size: 0.78rem;
       list-style: none;
       user-select: none;
+      white-space: nowrap;
     }
     .meta-summary::-webkit-details-marker {
       display: none;
@@ -579,6 +755,9 @@ INDEX_HTML = """<!doctype html>
       content: ">";
       display: inline-block;
       transition: transform 120ms ease;
+    }
+    .meta-summary-label {
+      text-transform: lowercase;
     }
     .meta-details[open] .meta-summary::before {
       transform: rotate(90deg);
@@ -786,37 +965,37 @@ INDEX_HTML = """<!doctype html>
     }
     .composer-shell {
       border-top: 1px solid var(--line);
-      padding-top: 0.75rem;
+      padding-top: 0.48rem;
+      padding-bottom: max(0rem, env(safe-area-inset-bottom, 0px));
       min-width: 0;
-      background: linear-gradient(180deg, rgba(7, 16, 25, 0.2), rgba(7, 16, 25, 0.92) 22%, rgba(7, 16, 25, 0.98));
-      backdrop-filter: blur(10px);
+      background: rgba(18, 33, 51, 0.98);
       flex: 0 0 auto;
     }
     textarea {
       width: 100%;
-      min-height: 3.25rem;
+      min-height: 2.9rem;
       max-height: 9rem;
       resize: vertical;
       border: 1px solid var(--line);
       border-radius: 1rem;
-      padding: 0.9rem;
+      padding: 0.74rem 0.82rem;
       background: rgba(45, 68, 94, 0.9);
       color: var(--ink);
     }
     .composer-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.65rem;
-      align-items: end;
+      gap: 0.52rem;
+      align-items: center;
     }
     .composer-actions {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
     }
     .send-icon-button {
-      width: 3rem;
-      height: 3rem;
-      min-width: 3rem;
+      width: 2.7rem;
+      height: 2.7rem;
+      min-width: 2.7rem;
       padding: 0;
       border-radius: 999px;
       display: inline-flex;
@@ -861,8 +1040,11 @@ INDEX_HTML = """<!doctype html>
       }
       .session {
         display: grid;
-        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        grid-template-rows: auto minmax(0, 1fr) auto;
         align-content: stretch;
+      }
+      .conversation-shell {
+        min-height: 0;
       }
       .session-list {
         min-height: 0;
@@ -873,13 +1055,152 @@ INDEX_HTML = """<!doctype html>
         max-height: none;
       }
     }
+    @media (max-width: 859px) {
+      html, body {
+        height: 100%;
+        overflow: hidden;
+      }
+      .app {
+        min-height: 0;
+        height: var(--redex-app-height, 100svh);
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+        overflow: hidden;
+        padding-top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+        padding-inline: 0.62rem;
+        padding-bottom: 0.32rem;
+      }
+      .hero {
+        padding: 0.52rem 0.62rem;
+        margin-bottom: 0;
+      }
+      .hero-grid {
+        gap: 0.42rem;
+      }
+      .hero-copy {
+        gap: 0.4rem;
+      }
+      .hero-wordmark {
+        gap: 0.4rem;
+      }
+      .hero-title {
+        font-size: 1.06rem;
+      }
+      .hero-mark {
+        width: 1.8rem;
+        height: 1.8rem;
+      }
+      .stat-pill {
+        padding: 0.3rem 0.48rem;
+      }
+      .stat-label {
+        display: none;
+      }
+      button.mobile-only {
+        display: inline-flex;
+      }
+      .mini-pill {
+        font-size: 0.73rem;
+      }
+      .layout {
+        display: block;
+        flex: 1 1 auto;
+        min-height: 0;
+        height: auto;
+        overflow: hidden;
+      }
+      .sidebar {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 0.55rem);
+        left: 0.62rem;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 0.55rem);
+        width: min(25rem, calc(100vw - 1.24rem));
+        z-index: 50;
+        transform: translateX(calc(-100% - 1rem));
+        transition: transform 160ms ease;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        align-content: stretch;
+      }
+      body.mobile-sidebar-open .sidebar {
+        transform: translateX(0);
+      }
+      body.mobile-sidebar-open .mobile-sidebar-backdrop {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .session {
+        display: flex;
+        flex-direction: column;
+        gap: 0.48rem;
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+        padding-bottom: 0;
+      }
+      .session-list {
+        min-height: 0;
+        max-height: none;
+      }
+      .conversation-shell {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      .sidebar-copy p {
+        display: none;
+      }
+      .session-header {
+        position: static;
+        z-index: auto;
+        background: transparent;
+        backdrop-filter: none;
+        padding-bottom: 0;
+        margin-bottom: 0;
+        flex: 0 0 auto;
+      }
+      .session-heading h2 {
+        font-size: 1rem;
+      }
+      .detail-strip {
+        margin-bottom: 0.55rem;
+      }
+      .conversation {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: none;
+        overflow: auto;
+        margin: 0;
+        padding-bottom: 0.2rem;
+      }
+      .bubble {
+        max-width: 100%;
+      }
+      textarea {
+        min-height: 3.4rem;
+      }
+      .composer-shell {
+        flex: 0 0 auto;
+        align-self: stretch;
+        margin: 0;
+        padding-top: 0.38rem;
+        padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.34rem);
+        background: rgba(18, 33, 51, 0.98);
+      }
+      .composer-row {
+        align-items: end;
+      }
+    }
   </style>
 </head>
 <body>
+  <div id="mobileSidebarBackdrop" class="mobile-sidebar-backdrop" aria-hidden="true"></div>
+  <div id="layoutDebug" class="layout-debug" aria-hidden="true"></div>
   <div class="app">
     <section class="panel hero">
       <div class="hero-grid">
         <div class="hero-copy">
+          <button id="mobileSessionsButton" class="secondary icon-button mobile-only" type="button" aria-label="Open sessions" title="Sessions">≡</button>
           <div class="hero-wordmark" aria-label="Redex">
             <svg class="hero-mark" viewBox="0 0 64 64" aria-hidden="true">
               <path d="M22 14 L8 32 L22 50" fill="none" stroke="#f8fbff" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -898,7 +1219,10 @@ INDEX_HTML = """<!doctype html>
             <span id="connectionBadge" class="stat-value">Connecting</span>
           </div>
         </div>
-        <span id="sessionCount" class="mini-pill">0 sessions</span>
+        <div class="hero-actions">
+          <button id="installButton" class="secondary install-button" type="button" hidden>Install</button>
+          <span id="sessionCount" class="mini-pill">0 sessions</span>
+        </div>
       </div>
     </section>
 
@@ -919,14 +1243,16 @@ INDEX_HTML = """<!doctype html>
         <div class="session-header">
           <div class="session-heading">
             <h2 id="sessionTitle">Select a session</h2>
+            <div id="sessionMetaInline" class="session-heading-meta"></div>
           </div>
           <div style="display:flex; gap:0.5rem; align-items:center;">
-            <span id="streamBadge" class="live-pill syncing">Syncing</span>
             <button id="reloadSessionButton" class="secondary icon-button" type="button" disabled aria-label="Reload thread" title="Reload thread">↻</button>
           </div>
         </div>
-        <div id="sessionMeta" class="detail-strip"></div>
-        <div id="conversation" class="conversation"></div>
+        <div class="conversation-shell">
+          <div id="conversation" class="conversation"></div>
+          <button id="scrollToEndButton" class="secondary icon-button scroll-end-button" type="button" aria-label="Scroll to end" title="Scroll to end">↓</button>
+        </div>
         <form id="composer" class="composer-shell">
           <div class="composer-row">
             <textarea id="promptInput" placeholder="Send a new prompt into this session..." disabled></textarea>
@@ -961,6 +1287,7 @@ INDEX_HTML = """<!doctype html>
       activeSessionRequestNonce: 0,
       sessionListRequestNonce: 0,
       activeSessionDetail: null,
+      sessionDetailCache: {},
       loadingOlderHistory: false,
       recentTurnsLimit: 40,
       defaultCwd: "__DEFAULT_CWD__",
@@ -975,19 +1302,25 @@ INDEX_HTML = """<!doctype html>
       sessionReloadTimer: null,
       activePollTimer: null,
       sessionPollTimer: null,
+      deferredInstallPrompt: null,
     };
 
     const sessionList = document.getElementById("sessionList");
     const sessionTitle = document.getElementById("sessionTitle");
-    const sessionMeta = document.getElementById("sessionMeta");
+    const sessionMetaInline = document.getElementById("sessionMetaInline");
     const conversation = document.getElementById("conversation");
     const promptInput = document.getElementById("promptInput");
     const sendButton = document.getElementById("sendButton");
     const reloadSessionButton = document.getElementById("reloadSessionButton");
+    const scrollToEndButton = document.getElementById("scrollToEndButton");
     const connectionBadge = document.getElementById("connectionBadge");
     const sessionCount = document.getElementById("sessionCount");
-    const streamBadge = document.getElementById("streamBadge");
     const searchInput = document.getElementById("searchInput");
+    const installButton = document.getElementById("installButton");
+    const mobileSessionsButton = document.getElementById("mobileSessionsButton");
+    const mobileSidebarBackdrop = document.getElementById("mobileSidebarBackdrop");
+    const layoutDebug = document.getElementById("layoutDebug");
+    const ACTIVE_SESSION_STORAGE_KEY = "redex.activeSessionId";
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -1379,13 +1712,114 @@ INDEX_HTML = """<!doctype html>
 
     function updateConnectionBadge() {
       connectionBadge.textContent = state.eventSourceHealthy ? "Live" : "Polling";
-      streamBadge.className = `live-pill ${state.eventSourceHealthy ? "live" : "syncing"}`;
-      streamBadge.textContent = state.eventSourceHealthy ? "Live updates" : "Polling";
     }
 
     function updateSessionCount() {
       const count = visibleSessions().length;
       sessionCount.textContent = `${count} session${count === 1 ? "" : "s"}`;
+    }
+
+    function isMobileViewport() {
+      return window.matchMedia("(max-width: 859px)").matches;
+    }
+
+    function setMobileSidebarOpen(open) {
+      document.body.classList.toggle("mobile-sidebar-open", !!open);
+    }
+
+    function closeMobileSidebar() {
+      setMobileSidebarOpen(false);
+    }
+
+    function maybeCloseMobileSidebar() {
+      if (isMobileViewport()) {
+        closeMobileSidebar();
+      }
+    }
+
+    function restoreActiveSessionPreference() {
+      try {
+        return window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    }
+
+    function persistActiveSessionPreference(sessionId) {
+      try {
+        if (sessionId) {
+          window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+        } else {
+          window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+        }
+      } catch {
+        // Ignore localStorage issues.
+      }
+    }
+
+    function updateInstallButtonVisibility() {
+      installButton.hidden = !state.deferredInstallPrompt;
+    }
+
+    function layoutDebugEnabled() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("debug") === "layout";
+    }
+
+    function updateLayoutDebug() {
+      if (!layoutDebugEnabled()) {
+        layoutDebug.classList.remove("visible");
+        layoutDebug.textContent = "";
+        return;
+      }
+      const app = document.querySelector(".app");
+      const sessionPanel = document.querySelector(".session");
+      const composer = document.getElementById("composer");
+      const vv = window.visualViewport;
+      const appRect = app ? app.getBoundingClientRect() : null;
+      const sessionRect = sessionPanel ? sessionPanel.getBoundingClientRect() : null;
+      const convoRect = conversation ? conversation.getBoundingClientRect() : null;
+      const composerRect = composer ? composer.getBoundingClientRect() : null;
+      const lines = [
+        `DEBUG LAYOUT`,
+        `url=${window.location.search || "(none)"}`,
+        `win.inner=${Math.round(window.innerWidth)}x${Math.round(window.innerHeight)}`,
+        `vv=${vv ? `${Math.round(vv.width)}x${Math.round(vv.height)} @ ${Math.round(vv.offsetTop)}` : "none"}`,
+        `app.h=${appRect ? Math.round(appRect.height) : "?"}`,
+        `session.h=${sessionRect ? Math.round(sessionRect.height) : "?"}`,
+        `conversation top=${convoRect ? Math.round(convoRect.top) : "?"} h=${convoRect ? Math.round(convoRect.height) : "?"} bottom=${convoRect ? Math.round(convoRect.bottom) : "?"}`,
+        `composer top=${composerRect ? Math.round(composerRect.top) : "?"} h=${composerRect ? Math.round(composerRect.height) : "?"} bottom=${composerRect ? Math.round(composerRect.bottom) : "?"}`,
+        `body.sidebar=${document.body.classList.contains("mobile-sidebar-open") ? "open" : "closed"}`,
+      ];
+      layoutDebug.textContent = lines.join(String.fromCharCode(10));
+      layoutDebug.classList.add("visible");
+    }
+
+    function syncViewportHeight() {
+      const viewport = window.visualViewport;
+      const height = viewport && viewport.height ? viewport.height : window.innerHeight;
+      document.documentElement.style.setProperty("--redex-app-height", `${Math.round(height)}px`);
+      updateLayoutDebug();
+    }
+
+    function conversationDistanceFromEnd() {
+      return Math.max(0, conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop);
+    }
+
+    function shouldShowScrollToEnd() {
+      return conversationDistanceFromEnd() > 56;
+    }
+
+    function updateScrollToEndButton() {
+      scrollToEndButton.classList.toggle("visible", shouldShowScrollToEnd());
+    }
+
+    function scrollConversationToEnd(behavior = "smooth") {
+      conversation.scrollTo({
+        top: conversation.scrollHeight,
+        behavior,
+      });
+      requestAnimationFrame(updateScrollToEndButton);
     }
 
     function sessionIndexById(sessions) {
@@ -1453,6 +1887,21 @@ INDEX_HTML = """<!doctype html>
         cwd: session.cwd || "",
         updatedAt: session.updatedAt || "",
       });
+    }
+
+    function cachedSessionDetail(sessionId) {
+      if (!sessionId) {
+        return null;
+      }
+      return state.sessionDetailCache[sessionId] || null;
+    }
+
+    function cacheSessionDetail(detail) {
+      const sessionId = detail?.session?.id;
+      if (!sessionId) {
+        return;
+      }
+      state.sessionDetailCache[sessionId] = detail;
     }
 
     function conversationKey(messages) {
@@ -1573,13 +2022,22 @@ INDEX_HTML = """<!doctype html>
         `;
       }).join("");
       for (const element of sessionList.querySelectorAll("[data-session-id]")) {
-        element.addEventListener("click", () => loadSession(element.dataset.sessionId));
+        element.addEventListener("click", () => {
+          maybeCloseMobileSidebar();
+          loadSession(element.dataset.sessionId);
+        });
       }
       for (const element of sessionList.querySelectorAll("[data-draft-group]")) {
-        element.addEventListener("click", () => createSession(element.dataset.draftGroup));
+        element.addEventListener("click", () => {
+          maybeCloseMobileSidebar();
+          createSession(element.dataset.draftGroup);
+        });
       }
       for (const element of sessionList.querySelectorAll("[data-group-create]")) {
-        element.addEventListener("click", () => createSession(element.dataset.groupCreate, element));
+        element.addEventListener("click", () => {
+          maybeCloseMobileSidebar();
+          createSession(element.dataset.groupCreate, element);
+        });
       }
       for (const element of sessionList.querySelectorAll("[data-group-collapse]")) {
         element.addEventListener("click", () => {
@@ -1650,6 +2108,7 @@ INDEX_HTML = """<!doctype html>
         if (forceStick) {
           requestAnimationFrame(() => {
             conversation.scrollTop = conversation.scrollHeight;
+            updateScrollToEndButton();
           });
         }
         return;
@@ -1684,12 +2143,14 @@ INDEX_HTML = """<!doctype html>
       if (forceStick) {
         requestAnimationFrame(() => {
           conversation.scrollTop = conversation.scrollHeight;
+          updateScrollToEndButton();
           maybeTypesetMath();
           hydrateDirectivePreviews().catch(() => {});
         });
       } else {
         requestAnimationFrame(() => {
           conversation.scrollTop = previousScrollTop;
+          updateScrollToEndButton();
           maybeTypesetMath();
           hydrateDirectivePreviews().catch(() => {});
         });
@@ -1698,6 +2159,7 @@ INDEX_HTML = """<!doctype html>
 
     function renderSessionDetail(detail, forceStick = false) {
       const session = detail.session || {};
+      cacheSessionDetail(detail);
       state.activeSessionDetail = detail;
       const nextMetaKey = sessionMetaKey(session);
       if (
@@ -1706,10 +2168,10 @@ INDEX_HTML = """<!doctype html>
         state.lastRenderedMetaKey !== nextMetaKey
       ) {
         sessionTitle.textContent = session.title || session.id || "Session";
-        sessionMeta.innerHTML = `
+        sessionMetaInline.innerHTML = `
           <details class="meta-details">
-            <summary class="meta-summary">Session details</summary>
-            <div class="detail-strip" style="margin-top:0.5rem; margin-bottom:0;">
+            <summary class="meta-summary"><span class="meta-summary-label">details</span></summary>
+            <div class="detail-strip" style="margin-top:0.4rem; margin-bottom:0;">
               <div class="detail-chip">
                 <span class="detail-chip-label">Status</span>
                 <span class="detail-chip-value">${escapeHtml(session.status || "unknown")}</span>
@@ -1748,10 +2210,10 @@ INDEX_HTML = """<!doctype html>
       state.lastRenderedMetaKey = null;
       state.lastRenderedConversationKey = null;
       sessionTitle.textContent = "New chat";
-      sessionMeta.innerHTML = draft ? `
+      sessionMetaInline.innerHTML = draft ? `
         <details class="meta-details">
-          <summary class="meta-summary">Session details</summary>
-          <div class="detail-strip" style="margin-top:0.5rem; margin-bottom:0;">
+          <summary class="meta-summary"><span class="meta-summary-label">details</span></summary>
+          <div class="detail-strip" style="margin-top:0.4rem; margin-bottom:0;">
             <div class="detail-chip">
               <span class="detail-chip-label">Workspace</span>
               <span class="detail-chip-value">${escapeHtml(draft.cwd || "all workspaces")}</span>
@@ -1760,12 +2222,28 @@ INDEX_HTML = """<!doctype html>
         </details>
       ` : "";
       conversation.innerHTML = '<div class="empty empty-state">Send the first prompt to create this chat.</div>';
+      updateScrollToEndButton();
       promptInput.disabled = false;
       sendButton.disabled = false;
       reloadSessionButton.disabled = true;
       requestAnimationFrame(() => {
         promptInput.focus();
       });
+    }
+
+    function renderLoadingSession() {
+      state.activeSessionDetail = null;
+      state.loadingOlderHistory = false;
+      state.lastRenderedSessionId = null;
+      state.lastRenderedMetaKey = null;
+      state.lastRenderedConversationKey = null;
+      sessionTitle.textContent = "Loading session...";
+      sessionMetaInline.innerHTML = "";
+      conversation.innerHTML = '<div class="empty empty-state">Loading transcript...</div>';
+      updateScrollToEndButton();
+      promptInput.disabled = true;
+      sendButton.disabled = true;
+      reloadSessionButton.disabled = true;
     }
 
     async function fetchJson(url, init) {
@@ -1803,6 +2281,7 @@ INDEX_HTML = """<!doctype html>
       const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
       const selectedSessionId = state.activeSessionId;
+      const persistedSessionId = restoreActiveSessionPreference();
       if (!state.draftSession) {
         if (state.initialSelectionDone) {
           const stillActive = state.activeSessionId && state.sessions.some((session) => session.id === state.activeSessionId);
@@ -1810,7 +2289,10 @@ INDEX_HTML = """<!doctype html>
             state.activeSessionId = state.sessions.length ? newestActiveSessionId() : null;
           }
         } else if (state.sessions.length) {
-          state.activeSessionId = newestActiveSessionId();
+          const preferredSession = persistedSessionId && state.sessions.some((session) => session.id === persistedSessionId)
+            ? persistedSessionId
+            : newestActiveSessionId();
+          state.activeSessionId = preferredSession;
         }
       }
       if (state.initialSelectionDone) {
@@ -1821,6 +2303,8 @@ INDEX_HTML = """<!doctype html>
       if (state.draftSession) {
         renderDraftSession();
       } else if (state.activeSessionId && state.activeSessionId === selectedSessionId) {
+        await loadSession(state.activeSessionId);
+      } else if (state.activeSessionId) {
         await loadSession(state.activeSessionId);
       }
       updateSessionCount();
@@ -1850,6 +2334,7 @@ INDEX_HTML = """<!doctype html>
       const requestNonce = ++state.activeSessionRequestNonce;
       state.draftSession = null;
       state.activeSessionId = sessionId;
+      persistActiveSessionPreference(sessionId);
       state.activeSessionDetail = null;
       state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
@@ -1860,11 +2345,12 @@ INDEX_HTML = """<!doctype html>
       }
       ensureEventSource(sessionId);
       renderSessions();
-      sessionTitle.textContent = "Loading session...";
-      sessionMeta.innerHTML = "";
-      promptInput.disabled = true;
-      sendButton.disabled = true;
-      reloadSessionButton.disabled = true;
+      const cachedDetail = cachedSessionDetail(sessionId);
+      if (cachedDetail) {
+        renderSessionDetail(cachedDetail, true);
+      } else {
+        renderLoadingSession();
+      }
       try {
         const detail = await fetchJson(sessionDetailUrl(sessionId));
         if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
@@ -1938,6 +2424,7 @@ INDEX_HTML = """<!doctype html>
         requestAnimationFrame(() => {
           const addedHeight = conversation.scrollHeight - previousScrollHeight;
           conversation.scrollTop = previousScrollTop + Math.max(0, addedHeight);
+          updateScrollToEndButton();
         });
       } catch {
         // Leave the current transcript rendered if loading older history fails.
@@ -2010,6 +2497,7 @@ INDEX_HTML = """<!doctype html>
         templateSessionId: preferredTemplateSessionId(groupKey),
       };
       state.activeSessionId = null;
+      persistActiveSessionPreference(null);
       ensureEventSource(null);
       renderSessions();
       renderDraftSession();
@@ -2127,6 +2615,18 @@ INDEX_HTML = """<!doctype html>
       state.searchQuery = event.target.value || "";
       renderSessions();
     });
+    mobileSessionsButton.addEventListener("click", () => setMobileSidebarOpen(true));
+    mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);
+    installButton.addEventListener("click", async () => {
+      if (!state.deferredInstallPrompt) {
+        return;
+      }
+      const prompt = state.deferredInstallPrompt;
+      state.deferredInstallPrompt = null;
+      updateInstallButtonVisibility();
+      await prompt.prompt();
+      await prompt.userChoice.catch(() => null);
+    });
     promptInput.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" || event.shiftKey) {
         return;
@@ -2143,9 +2643,42 @@ INDEX_HTML = """<!doctype html>
       }
     });
     document.getElementById("composer").addEventListener("submit", sendPrompt);
+    conversation.addEventListener("scroll", updateScrollToEndButton, { passive: true });
+    scrollToEndButton.addEventListener("click", () => scrollConversationToEnd());
     window.addEventListener("redex-math-ready", () => maybeTypesetMath());
+    window.addEventListener("beforeinstallprompt", (event) => {
+      event.preventDefault();
+      state.deferredInstallPrompt = event;
+      updateInstallButtonVisibility();
+    });
+    window.addEventListener("appinstalled", () => {
+      state.deferredInstallPrompt = null;
+      updateInstallButtonVisibility();
+    });
+    window.addEventListener("resize", syncViewportHeight);
+    window.addEventListener("resize", () => {
+      if (!isMobileViewport()) {
+        closeMobileSidebar();
+      }
+    });
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeMobileSidebar();
+      }
+    });
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      });
+    }
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", syncViewportHeight);
+      window.visualViewport.addEventListener("scroll", syncViewportHeight);
+    }
 
+    syncViewportHeight();
     updateConnectionBadge();
+    updateInstallButtonVisibility();
     loadSessions().catch((error) => {
       sessionTitle.textContent = error.message || String(error);
     });
@@ -2331,6 +2864,12 @@ class RedexHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/assets/"):
             self._handle_asset(parsed.path)
             return
+        if parsed.path == "/manifest.webmanifest":
+            self._handle_manifest()
+            return
+        if parsed.path == "/sw.js":
+            self._handle_service_worker()
+            return
         if parsed.path == "/":
             self._handle_index()
             return
@@ -2387,6 +2926,27 @@ class RedexHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(exc)})
             return
         self._send_json(HTTPStatus.OK, {"ok": True})
+
+    def _handle_manifest(self) -> None:
+        body = MANIFEST_JSON.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_service_worker(self) -> None:
+        body = SERVICE_WORKER_JS.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Service-Worker-Allowed", "/")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_asset(self, path: str) -> None:
         relative = path.removeprefix("/assets/").strip()
