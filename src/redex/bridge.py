@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import queue
@@ -13,8 +14,14 @@ from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from pywebpush import WebPushException
+from pywebpush import webpush
 
 from .app_server import CodexAppServerClient
 from .app_server import CodexAppServerError
@@ -29,6 +36,9 @@ EVENT_BACKLOG_LIMIT = 500
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 DEFAULT_TURN_PAGE_LIMIT = 40
 MAX_TURN_PAGE_LIMIT = 100
+RUNTIME_DIR = Path.home() / ".codex" / "runtime"
+WEB_PUSH_CONFIG_PATH = RUNTIME_DIR / "redex-webpush-vapid.json"
+WEB_PUSH_SUBSCRIPTIONS_PATH = RUNTIME_DIR / "redex-webpush-subscriptions.json"
 MANIFEST_JSON = json.dumps(
     {
         "name": "Redex",
@@ -50,7 +60,7 @@ MANIFEST_JSON = json.dumps(
     },
     indent=2,
 )
-SERVICE_WORKER_JS = """const CACHE_NAME = "redex-shell-v1";
+SERVICE_WORKER_JS = """const CACHE_NAME = "redex-shell-v2";
 const SHELL_URLS = ["/", "/manifest.webmanifest", "/assets/redex-mark.svg"];
 
 self.addEventListener("install", (event) => {
@@ -87,6 +97,67 @@ self.addEventListener("fetch", (event) => {
         return response;
       })
       .catch(() => caches.match(request).then((cached) => cached || caches.match("/"))),
+  );
+});
+
+self.addEventListener("push", (event) => {
+  if (!event.data) {
+    return;
+  }
+  let payload = {};
+  try {
+    payload = event.data.json();
+  } catch {
+    return;
+  }
+  const title = payload.title || "Codex replied";
+  const options = {
+    body: payload.body || "A session has a new final response.",
+    icon: "/assets/redex-mark.svg",
+    badge: "/assets/redex-mark.svg",
+    tag: payload.threadId || "redex-final-response",
+    renotify: false,
+    data: {
+      url: payload.url || "/",
+      threadId: payload.threadId || "",
+      turnId: payload.turnId || "",
+    },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const targetUrl = new URL(data.url || "/", self.location.origin).toString();
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clientList) => {
+      for (const client of clientList) {
+        if (!client || !client.url) {
+          continue;
+        }
+        const clientUrl = new URL(client.url);
+        if (clientUrl.origin !== self.location.origin) {
+          continue;
+        }
+        client.postMessage({
+          type: "redex-open-session",
+          url: targetUrl,
+          sessionId: data.threadId || "",
+        });
+        if ("focus" in client) {
+          await client.focus();
+        }
+        if ("navigate" in client && client.url !== targetUrl) {
+          await client.navigate(targetUrl);
+        }
+        return;
+      }
+      if (clients.openWindow) {
+        return clients.openWindow(targetUrl);
+      }
+      return undefined;
+    }),
   );
 });
 """
@@ -237,6 +308,70 @@ INDEX_HTML = """<!doctype html>
       font-size: 0.84rem;
       line-height: 1;
       white-space: nowrap;
+    }
+    .notification-button.is-enabled {
+      background: rgba(127, 176, 222, 0.24);
+      color: var(--accent-strong);
+      border: 1px solid rgba(220, 236, 255, 0.2);
+    }
+    .notification-button.is-blocked {
+      background: rgba(83, 92, 106, 0.92);
+      color: var(--muted);
+    }
+    .notify-menu {
+      position: relative;
+    }
+    .notify-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38rem;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+    .notify-summary::-webkit-details-marker {
+      display: none;
+    }
+    .notify-summary::after {
+      content: "▾";
+      font-size: 0.72rem;
+      opacity: 0.8;
+      transition: transform 120ms ease;
+    }
+    .notify-menu[open] .notify-summary::after {
+      transform: rotate(180deg);
+    }
+    .notify-popover {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 0.45rem);
+      z-index: 80;
+      width: min(17rem, calc(100vw - 1.4rem));
+      padding: 0.72rem;
+      border-radius: 0.9rem;
+      border: 1px solid var(--line);
+      background: rgba(24, 38, 56, 0.98);
+      box-shadow: 0 1rem 2.2rem rgba(0, 0, 0, 0.34);
+      display: grid;
+      gap: 0.55rem;
+    }
+    .notify-title {
+      font-size: 0.84rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .notify-copy {
+      color: var(--muted);
+      font-size: 0.8rem;
+      line-height: 1.4;
+    }
+    .notify-action {
+      width: 100%;
+      justify-content: center;
+      padding: 0.48rem 0.76rem;
+      border-radius: 999px;
+      font-size: 0.84rem;
+      line-height: 1.1;
     }
     .mobile-sidebar-backdrop {
       position: fixed;
@@ -710,6 +845,15 @@ INDEX_HTML = """<!doctype html>
       margin-left: 0;
       max-width: min(46rem, 100%);
     }
+    .bubble.file-change-item {
+      background: transparent;
+      border: 0;
+      padding: 0;
+      margin-right: auto;
+      margin-left: 0;
+      max-width: min(54rem, 100%);
+      box-shadow: none;
+    }
     .commentary-details {
       width: 100%;
     }
@@ -795,6 +939,174 @@ INDEX_HTML = """<!doctype html>
     .bubble.commentary .markdown {
       font-size: 0.92rem;
       color: rgba(225, 235, 247, 0.78);
+    }
+    .file-change-card {
+      width: min(52rem, 100%);
+      margin-right: auto;
+      border-radius: 1rem;
+      border: 1px solid rgba(170, 205, 238, 0.12);
+      background: rgba(29, 36, 45, 0.94);
+      overflow: hidden;
+      box-shadow: 0 10px 26px rgba(4, 8, 14, 0.18);
+    }
+    .file-change-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.76rem 0.92rem;
+      color: #f8fbff;
+      font-size: 0.95rem;
+    }
+    .file-change-title {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .diff-stat-add {
+      color: #4fd08b;
+    }
+    .diff-stat-del {
+      color: #f26d6d;
+    }
+    .file-change-status {
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-transform: lowercase;
+    }
+    .file-change-list {
+      border-top: 1px solid rgba(170, 205, 238, 0.08);
+    }
+    .file-change-item {
+      border-top: 1px solid rgba(170, 205, 238, 0.08);
+    }
+    .file-change-item:first-child {
+      border-top: 0;
+    }
+    .file-change-item-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.78rem 0.92rem;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+    .file-change-item-summary::-webkit-details-marker {
+      display: none;
+    }
+    .file-change-item-summary::after {
+      content: "⌄";
+      color: var(--muted);
+      font-size: 0.92rem;
+      transition: transform 120ms ease;
+      flex: 0 0 auto;
+    }
+    .file-change-item[open] .file-change-item-summary::after {
+      transform: rotate(180deg);
+    }
+    .file-change-item-main {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.55rem;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .file-change-path {
+      color: #f8fbff;
+      font-size: 0.95rem;
+      word-break: break-word;
+    }
+    .file-change-kind {
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .file-change-move {
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    .file-change-item-stats {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.38rem;
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.88rem;
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
+    .file-change-diff {
+      margin: 0;
+      padding: 0.18rem 0 0.42rem;
+      background: rgba(22, 28, 35, 0.98);
+      border-top: 1px solid rgba(170, 205, 238, 0.08);
+      overflow: auto;
+    }
+    .file-change-line {
+      display: block;
+      padding: 0 0.92rem;
+      font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 0.8rem;
+      line-height: 1.45;
+      white-space: pre;
+    }
+    .file-change-line.add {
+      background: rgba(37, 82, 56, 0.44);
+      color: #c8f0d8;
+    }
+    .file-change-line.del {
+      background: rgba(106, 42, 42, 0.4);
+      color: #ffd2d2;
+    }
+    .file-change-line.hunk {
+      color: #7fb0de;
+    }
+    .file-change-line.meta {
+      color: #aebfd2;
+    }
+    .file-change-line.ctx {
+      color: #dde7f2;
+    }
+    .thinking-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.48rem;
+      margin-right: auto;
+      padding: 0.12rem 0 0.12rem 0.78rem;
+      color: rgba(225, 235, 247, 0.8);
+      border-left: 2px solid rgba(134, 185, 230, 0.2);
+      font-size: 0.9rem;
+    }
+    .thinking-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.22rem;
+    }
+    .thinking-dot {
+      width: 0.34rem;
+      height: 0.34rem;
+      border-radius: 999px;
+      background: rgba(159, 214, 255, 0.78);
+      animation: redex-thinking-pulse 1.1s ease-in-out infinite;
+    }
+    .thinking-dot:nth-child(2) {
+      animation-delay: 0.16s;
+    }
+    .thinking-dot:nth-child(3) {
+      animation-delay: 0.32s;
+    }
+    @keyframes redex-thinking-pulse {
+      0%, 80%, 100% {
+        opacity: 0.28;
+        transform: translateY(0);
+      }
+      40% {
+        opacity: 1;
+        transform: translateY(-1px);
+      }
     }
     .markdown p {
       margin: 0;
@@ -1220,6 +1532,14 @@ INDEX_HTML = """<!doctype html>
           </div>
         </div>
         <div class="hero-actions">
+          <details id="notificationsMenu" class="notify-menu">
+            <summary id="notificationsButton" class="secondary install-button notification-button notify-summary">Notify...</summary>
+            <div class="notify-popover">
+              <div id="notificationsTitle" class="notify-title">Final reply notifications</div>
+              <div id="notificationsCopy" class="notify-copy">Only final responses notify.</div>
+              <button id="notificationsActionButton" class="secondary notify-action" type="button">Enable</button>
+            </div>
+          </details>
           <button id="installButton" class="secondary install-button" type="button" hidden>Install</button>
           <span id="sessionCount" class="mini-pill">0 sessions</span>
         </div>
@@ -1303,6 +1623,13 @@ INDEX_HTML = """<!doctype html>
       activePollTimer: null,
       sessionPollTimer: null,
       deferredInstallPrompt: null,
+      notificationsSupported: false,
+      notificationsEnabled: false,
+      notificationsBusy: false,
+      notificationsPermission: "default",
+      notificationsPublicKey: "",
+      notificationsEndpoint: "",
+      notificationsError: "",
     };
 
     const sessionList = document.getElementById("sessionList");
@@ -1317,6 +1644,11 @@ INDEX_HTML = """<!doctype html>
     const sessionCount = document.getElementById("sessionCount");
     const searchInput = document.getElementById("searchInput");
     const installButton = document.getElementById("installButton");
+    const notificationsMenu = document.getElementById("notificationsMenu");
+    const notificationsButton = document.getElementById("notificationsButton");
+    const notificationsTitle = document.getElementById("notificationsTitle");
+    const notificationsCopy = document.getElementById("notificationsCopy");
+    const notificationsActionButton = document.getElementById("notificationsActionButton");
     const mobileSessionsButton = document.getElementById("mobileSessionsButton");
     const mobileSidebarBackdrop = document.getElementById("mobileSidebarBackdrop");
     const layoutDebug = document.getElementById("layoutDebug");
@@ -1339,6 +1671,10 @@ INDEX_HTML = """<!doctype html>
       return parts.length ? parts[parts.length - 1] : String(path);
     }
 
+    function cloneJson(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
     function shortId(id) {
       if (!id) {
         return "";
@@ -1354,12 +1690,76 @@ INDEX_HTML = """<!doctype html>
       return status ? String(status).replace(/[^a-z0-9_-]+/gi, "-").toLowerCase() : "unknown";
     }
 
+    function sessionIdFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get("session");
+      return raw && raw.trim() ? raw.trim() : null;
+    }
+
+    function updateSessionUrl(sessionId) {
+      const url = new URL(window.location.href);
+      if (sessionId) {
+        url.searchParams.set("session", sessionId);
+      } else {
+        url.searchParams.delete("session");
+      }
+      const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+      const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (nextUrl !== currentUrl) {
+        window.history.replaceState({}, "", nextUrl);
+      }
+    }
+
     function phaseLabel(message) {
       const raw = String(message.phase || (message.role === "assistant" ? "reply" : "prompt")).toLowerCase();
       if (raw === "prompt" || raw === "final_answer" || raw === "reply") {
         return "";
       }
       return raw.replaceAll("_", " ");
+    }
+
+    function extractLiveUserText(content) {
+      if (!Array.isArray(content)) {
+        return "";
+      }
+      return content
+        .filter((part) => part && part.type === "text" && typeof part.text === "string" && part.text.trim())
+        .map((part) => part.text.replace(/\\s+$/g, ""))
+        .join("\\n\\n")
+        .trim();
+    }
+
+    function normalizeLiveItemMessage(item, turnId) {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      if (item.type === "userMessage") {
+        const text = extractLiveUserText(item.content);
+        if (!text) {
+          return null;
+        }
+        return {
+          itemId: item.id || "",
+          turnId: turnId || "",
+          turnStatus: "",
+          timestamp: "",
+          role: "user",
+          phase: null,
+          text,
+        };
+      }
+      if (item.type === "agentMessage") {
+        return {
+          itemId: item.id || "",
+          turnId: turnId || "",
+          turnStatus: "",
+          timestamp: "",
+          role: "assistant",
+          phase: item.phase || null,
+          text: typeof item.text === "string" ? item.text.replace(/\\s+$/g, "") : "",
+        };
+      }
+      return null;
     }
 
     function visibleSessions() {
@@ -1663,6 +2063,161 @@ INDEX_HTML = """<!doctype html>
       return parts.join("");
     }
 
+    function renderDiffLines(diff) {
+      const lines = String(diff || "").split("\\n");
+      return lines.map((line) => {
+        let cls = "ctx";
+        if (line.startsWith("@@")) {
+          cls = "hunk";
+        } else if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+          cls = "meta";
+        } else if (line.startsWith("+")) {
+          cls = "add";
+        } else if (line.startsWith("-")) {
+          cls = "del";
+        }
+        return `<span class="file-change-line ${cls}">${escapeHtml(line || " ")}</span>`;
+      }).join("");
+    }
+
+    function renderFileChangeCard(message) {
+      const summary = message.changeSummary || {};
+      const changes = Array.isArray(message.changes) ? message.changes : [];
+      const files = Number(summary.files || changes.length || 0);
+      const added = Number(summary.added || 0);
+      const deleted = Number(summary.deleted || 0);
+      return `
+        <div class="file-change-card">
+          <div class="file-change-header">
+            <div class="file-change-title">
+              <strong>${escapeHtml(`${files} file${files === 1 ? "" : "s"} changed`)}</strong>
+              <span class="diff-stat-add">+${escapeHtml(String(added))}</span>
+              <span class="diff-stat-del">-${escapeHtml(String(deleted))}</span>
+            </div>
+            ${message.fileChangeStatus ? `<span class="file-change-status">${escapeHtml(String(message.fileChangeStatus))}</span>` : ""}
+          </div>
+          <div class="file-change-list">
+            ${changes.map((change) => `
+              <details class="file-change-item">
+                <summary class="file-change-item-summary">
+                  <span class="file-change-item-main">
+                    <span class="file-change-path">${escapeHtml(change.path || "")}</span>
+                    ${change.kind ? `<span class="file-change-kind">${escapeHtml(change.kind)}</span>` : ""}
+                    ${change.movePath ? `<span class="file-change-move">→ ${escapeHtml(change.movePath)}</span>` : ""}
+                  </span>
+                  <span class="file-change-item-stats">
+                    <span class="diff-stat-add">+${escapeHtml(String(change.added ?? 0))}</span>
+                    <span class="diff-stat-del">-${escapeHtml(String(change.deleted ?? 0))}</span>
+                  </span>
+                </summary>
+                <pre class="file-change-diff">${renderDiffLines(change.diff || "")}</pre>
+              </details>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function normalizedTurnStatus(status) {
+      return String(status || "").toLowerCase();
+    }
+
+    function isTerminalTurnStatus(status) {
+      const normalized = normalizedTurnStatus(status);
+      return normalized === "completed" || normalized === "failed" || normalized === "cancelled" || normalized === "canceled" || normalized === "aborted";
+    }
+
+    function hasFinalAssistantMessageForTurn(messages, turnId) {
+      return (messages || []).some((message) => (
+        message &&
+        message.turnId === turnId &&
+        message.role === "assistant" &&
+        message.type !== "fileChange" &&
+        message.phase !== "commentary" &&
+        String(message.text || "").trim()
+      ));
+    }
+
+    function aggregateTurnFileChanges(messages) {
+      const byTurn = new Map();
+      for (const message of messages || []) {
+        if (message?.type !== "fileChange") {
+          continue;
+        }
+        if (!isTerminalTurnStatus(message.turnStatus) || String(message.fileChangeStatus || "").toLowerCase() !== "completed") {
+          continue;
+        }
+        const turnId = message.turnId || "";
+        if (!turnId) {
+          continue;
+        }
+        let entry = byTurn.get(turnId);
+        if (!entry) {
+          entry = new Map();
+          byTurn.set(turnId, entry);
+        }
+        for (const change of Array.isArray(message.changes) ? message.changes : []) {
+          const key = `${change.path || ""}::${change.movePath || ""}`;
+          entry.set(key, change);
+        }
+      }
+      const result = new Map();
+      for (const [turnId, changesByKey] of byTurn.entries()) {
+        const changes = Array.from(changesByKey.values());
+        if (!changes.length) {
+          continue;
+        }
+        const summary = changes.reduce((acc, change) => ({
+          files: acc.files + 1,
+          added: acc.added + Number(change.added || 0),
+          deleted: acc.deleted + Number(change.deleted || 0),
+        }), { files: 0, added: 0, deleted: 0 });
+        result.set(turnId, {
+          type: "fileChange",
+          turnId,
+          fileChangeStatus: "completed",
+          changes,
+          changeSummary: summary,
+        });
+      }
+      return result;
+    }
+
+    function isRenderableFinalAssistantMessage(message) {
+      return !!(
+        message &&
+        message.role === "assistant" &&
+        message.type !== "fileChange" &&
+        message.phase !== "commentary" &&
+        String(message.text || "").trim()
+      );
+    }
+
+    function isLastRenderableFinalAssistantMessageForTurn(message, visibleMessages, index) {
+      if (!isRenderableFinalAssistantMessage(message)) {
+        return false;
+      }
+      for (let nextIndex = index + 1; nextIndex < visibleMessages.length; nextIndex += 1) {
+        const candidate = visibleMessages[nextIndex];
+        if (candidate?.turnId === message.turnId && isRenderableFinalAssistantMessage(candidate)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function shouldShowThinkingIndicator(detail, messages) {
+      const sessionStatus = String(detail?.session?.status || "").toLowerCase();
+      if (sessionStatus === "active") {
+        return true;
+      }
+      const latestTurnMessage = [...(messages || [])].reverse().find((message) => message && message.turnId);
+      if (!latestTurnMessage) {
+        return false;
+      }
+      return !isTerminalTurnStatus(latestTurnMessage.turnStatus);
+    }
+
     function transcriptNeedsMath(messages) {
       return (messages || []).some((message) => {
         const text = String(message.text || "");
@@ -1759,6 +2314,222 @@ INDEX_HTML = """<!doctype html>
 
     function updateInstallButtonVisibility() {
       installButton.hidden = !state.deferredInstallPrompt;
+    }
+
+    function pushNotificationsSupported() {
+      return (
+        window.isSecureContext &&
+        "Notification" in window &&
+        "serviceWorker" in navigator &&
+        "PushManager" in window
+      );
+    }
+
+    function updateNotificationsButton() {
+      if (!pushNotificationsSupported()) {
+        state.notificationsSupported = false;
+        notificationsButton.classList.remove("is-enabled");
+        notificationsButton.classList.add("is-blocked");
+        if (window.isSecureContext) {
+          notificationsButton.textContent = "Notify unavailable";
+          notificationsTitle.textContent = "Notifications unavailable";
+          notificationsCopy.textContent = "This browser can open Redex, but Push/Service Worker notifications are not available here.";
+        } else {
+          notificationsButton.textContent = "Notify needs HTTPS";
+          notificationsTitle.textContent = "Notifications need HTTPS";
+          notificationsCopy.textContent = "Phone push needs a secure origin. Your current Redex URL is plain HTTP, so the browser will not allow push registration.";
+        }
+        notificationsActionButton.disabled = true;
+        notificationsActionButton.textContent = "Unavailable";
+        return;
+      }
+      state.notificationsSupported = true;
+      state.notificationsError = state.notificationsBusy ? state.notificationsError : state.notificationsError;
+      notificationsButton.classList.toggle("is-enabled", !!state.notificationsEnabled);
+      notificationsButton.classList.toggle(
+        "is-blocked",
+        state.notificationsPermission === "denied" && !state.notificationsEnabled,
+      );
+      if (state.notificationsBusy) {
+        notificationsButton.textContent = "Working...";
+        notificationsTitle.textContent = "Final reply notifications";
+        notificationsCopy.textContent = "Only final responses notify. Updating notification registration now.";
+        notificationsActionButton.disabled = true;
+        notificationsActionButton.textContent = "Working...";
+        return;
+      }
+      if (state.notificationsError) {
+        notificationsButton.textContent = "Notify error";
+        notificationsTitle.textContent = "Notifications hit an error";
+        notificationsCopy.textContent = state.notificationsError;
+        notificationsActionButton.disabled = false;
+        notificationsActionButton.textContent = state.notificationsEnabled ? "Try disabling again" : "Try again";
+        return;
+      }
+      if (state.notificationsPermission === "denied") {
+        notificationsButton.textContent = "Notify blocked";
+        notificationsTitle.textContent = "Notifications blocked";
+        notificationsCopy.textContent = "Browser notifications are blocked for this origin. Re-enable them in browser site settings, then try again.";
+        notificationsActionButton.disabled = true;
+        notificationsActionButton.textContent = "Blocked";
+        return;
+      }
+      notificationsButton.textContent = state.notificationsEnabled ? "Notify on" : "Notify off";
+      notificationsTitle.textContent = "Final reply notifications";
+      notificationsCopy.textContent = state.notificationsEnabled
+        ? "Only final responses notify. Tap below to turn notifications off on this device."
+        : "Only final responses notify. Tap below to enable notifications on this device.";
+      notificationsActionButton.disabled = state.notificationsBusy || !state.notificationsPublicKey;
+      notificationsActionButton.textContent = state.notificationsEnabled ? "Disable notifications" : "Enable notifications";
+    }
+
+    function withTimeout(promise, ms, label) {
+      return new Promise((resolve, reject) => {
+        const timer = window.setTimeout(() => reject(new Error(`${label} timed out.`)), ms);
+        Promise.resolve(promise)
+          .then((value) => {
+            window.clearTimeout(timer);
+            resolve(value);
+          })
+          .catch((error) => {
+            window.clearTimeout(timer);
+            reject(error);
+          });
+      });
+    }
+
+    function urlBase64ToUint8Array(value) {
+      const padding = "=".repeat((4 - (value.length % 4)) % 4);
+      const normalized = (value + padding).replaceAll("-", "+").replaceAll("_", "/");
+      const decoded = window.atob(normalized);
+      return Uint8Array.from(decoded, (char) => char.charCodeAt(0));
+    }
+
+    async function ensureServiceWorkerRegistration() {
+      if (!("serviceWorker" in navigator)) {
+        return null;
+      }
+      const existing = await withTimeout(navigator.serviceWorker.getRegistration(), 4000, "Service worker lookup");
+      if (existing) {
+        await withTimeout(navigator.serviceWorker.ready, 6000, "Service worker activation");
+        return existing;
+      }
+      await withTimeout(navigator.serviceWorker.register("/sw.js"), 6000, "Service worker registration");
+      return withTimeout(navigator.serviceWorker.ready, 6000, "Service worker activation");
+    }
+
+    async function currentPushSubscription() {
+      const registration = await ensureServiceWorkerRegistration();
+      if (!registration || !("pushManager" in registration)) {
+        return null;
+      }
+      return registration.pushManager.getSubscription();
+    }
+
+    async function syncNotificationsState(clearError = false) {
+      if (clearError) {
+        state.notificationsError = "";
+      }
+      state.notificationsPermission = "Notification" in window ? Notification.permission : "default";
+      if (!pushNotificationsSupported()) {
+        updateNotificationsButton();
+        return;
+      }
+      try {
+        const status = await fetchJson("/api/notifications");
+        state.notificationsPublicKey = typeof status.publicKey === "string" ? status.publicKey : "";
+      } catch {
+        state.notificationsPublicKey = "";
+      }
+      try {
+        const subscription = await withTimeout(currentPushSubscription(), 6000, "Notification state check");
+        if (subscription && state.notificationsPublicKey) {
+          await fetchJson("/api/notifications/subscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ subscription: subscription.toJSON() }),
+          }).catch(() => ({}));
+        }
+        state.notificationsEnabled = !!subscription;
+        state.notificationsEndpoint = subscription?.endpoint || "";
+      } catch {
+        state.notificationsEnabled = false;
+        state.notificationsEndpoint = "";
+      }
+      updateNotificationsButton();
+    }
+
+    async function enableNotifications() {
+      const permission = Notification.permission === "granted"
+        ? "granted"
+        : await withTimeout(Notification.requestPermission(), 10000, "Notification permission");
+      state.notificationsPermission = permission;
+      if (permission !== "granted") {
+        state.notificationsEnabled = false;
+        updateNotificationsButton();
+        return;
+      }
+      const registration = await ensureServiceWorkerRegistration();
+      if (!registration || !state.notificationsPublicKey) {
+        throw new Error("Notifications are not ready yet.");
+      }
+      let subscription = await withTimeout(registration.pushManager.getSubscription(), 6000, "Push subscription lookup");
+      if (!subscription) {
+        subscription = await withTimeout(
+          registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(state.notificationsPublicKey),
+          }),
+          15000,
+          "Push subscription",
+        );
+      }
+      await withTimeout(fetchJson("/api/notifications/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: subscription.toJSON() }),
+      }), 8000, "Redex subscription sync");
+      state.notificationsEnabled = true;
+      state.notificationsEndpoint = subscription.endpoint || "";
+    }
+
+    async function disableNotifications() {
+      const subscription = await withTimeout(currentPushSubscription(), 6000, "Push subscription lookup");
+      const endpoint = subscription?.endpoint || state.notificationsEndpoint;
+      if (endpoint) {
+        await withTimeout(fetchJson("/api/notifications/unsubscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint }),
+        }), 8000, "Redex unsubscribe sync").catch(() => ({}));
+      }
+      if (subscription) {
+        await withTimeout(subscription.unsubscribe(), 8000, "Push unsubscribe").catch(() => false);
+      }
+      state.notificationsEnabled = false;
+      state.notificationsEndpoint = "";
+    }
+
+    async function toggleNotifications() {
+      if (!pushNotificationsSupported()) {
+        return;
+      }
+      state.notificationsBusy = true;
+      state.notificationsError = "";
+      updateNotificationsButton();
+      try {
+        if (state.notificationsEnabled) {
+          await disableNotifications();
+        } else {
+          await enableNotifications();
+        }
+      } catch (error) {
+        console.error(error);
+        state.notificationsError = error?.message || String(error);
+      } finally {
+        state.notificationsBusy = false;
+        await syncNotificationsState();
+      }
     }
 
     function layoutDebugEnabled() {
@@ -1904,6 +2675,120 @@ INDEX_HTML = """<!doctype html>
       state.sessionDetailCache[sessionId] = detail;
     }
 
+    function upsertLiveMessage(detail, message) {
+      const messages = [...(detail.messages || [])];
+      const index = messages.findIndex((entry) => entry.itemId && entry.itemId === message.itemId);
+      if (index >= 0) {
+        messages[index] = {
+          ...messages[index],
+          ...message,
+          timestamp: message.timestamp || messages[index].timestamp || "",
+          turnStatus: message.turnStatus || messages[index].turnStatus || "",
+          phase: message.phase ?? messages[index].phase ?? null,
+          text: typeof message.text === "string" && message.text.length ? message.text : (messages[index].text || ""),
+        };
+      } else {
+        messages.push(message);
+      }
+      return {
+        ...detail,
+        messages,
+      };
+    }
+
+    function appendLiveAgentDelta(detail, params) {
+      const itemId = params.itemId || "";
+      const delta = typeof params.delta === "string" ? params.delta : "";
+      if (!itemId || !delta) {
+        return detail;
+      }
+      const messages = [...(detail.messages || [])];
+      const index = messages.findIndex((entry) => entry.itemId && entry.itemId === itemId);
+      if (index >= 0) {
+        messages[index] = {
+          ...messages[index],
+          text: `${messages[index].text || ""}${delta}`,
+        };
+      } else {
+        messages.push({
+          itemId,
+          turnId: params.turnId || "",
+          turnStatus: "",
+          timestamp: "",
+          role: "assistant",
+          phase: null,
+          text: delta,
+        });
+      }
+      return {
+        ...detail,
+        messages,
+      };
+    }
+
+    function renderActiveSessionFromLiveUpdate(nextDetail) {
+      if (!nextDetail) {
+        return;
+      }
+      const shouldStick = conversationDistanceFromEnd() <= 56;
+      renderSessionDetail(nextDetail, shouldStick);
+    }
+
+    function applyIncrementalLiveEvent(payload) {
+      if (!state.activeSessionDetail || !state.activeSessionId) {
+        return false;
+      }
+      const method = payload.method || "";
+      const params = payload.params || {};
+      const threadId = eventThreadId(payload);
+      if (!threadId || threadId !== state.activeSessionId) {
+        return false;
+      }
+      if (method === "item/agentMessage/delta") {
+        const nextDetail = appendLiveAgentDelta(cloneJson(state.activeSessionDetail), params);
+        renderActiveSessionFromLiveUpdate(nextDetail);
+        return true;
+      }
+      if (method === "item/started" || method === "item/completed") {
+        const message = normalizeLiveItemMessage(params.item, params.turnId);
+        if (!message) {
+          return false;
+        }
+        const nextDetail = upsertLiveMessage(cloneJson(state.activeSessionDetail), message);
+        renderActiveSessionFromLiveUpdate(nextDetail);
+        return true;
+      }
+      return false;
+    }
+
+    function shouldRefreshSessionListForEvent(method) {
+      if (!method) {
+        return false;
+      }
+      if (
+        method === "item/agentMessage/delta" ||
+        method === "item/reasoning/textDelta" ||
+        method === "item/reasoning/summaryTextDelta" ||
+        method === "item/plan/delta" ||
+        method === "item/commandExecution/outputDelta" ||
+        method === "command/exec/outputDelta" ||
+        method === "item/fileChange/outputDelta"
+      ) {
+        return false;
+      }
+      return method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/");
+    }
+
+    function shouldRefreshActiveSessionForEvent(method) {
+      if (!method) {
+        return false;
+      }
+      if (method === "item/agentMessage/delta" || method === "item/started" || method === "item/completed") {
+        return false;
+      }
+      return method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/");
+    }
+
     function conversationKey(messages) {
       return JSON.stringify((messages || []).map((message) => [
         message.itemId || "",
@@ -1911,8 +2796,11 @@ INDEX_HTML = """<!doctype html>
         message.turnStatus || "",
         message.timestamp || "",
         message.role || "",
+        message.type || "",
         message.phase || "",
         message.text || "",
+        JSON.stringify(message.changeSummary || null),
+        JSON.stringify(message.changes || null),
       ]));
     }
 
@@ -1925,8 +2813,11 @@ INDEX_HTML = """<!doctype html>
         message?.turnStatus || "",
         message?.timestamp || "",
         message?.role || "",
+        message?.type || "",
         message?.phase || "",
         message?.text || "",
+        JSON.stringify(message?.changeSummary || null),
+        JSON.stringify(message?.changes || null),
       ]);
     }
 
@@ -2071,10 +2962,12 @@ INDEX_HTML = """<!doctype html>
 
     function renderConversation(detail, forceStick = false) {
       const messages = coalescedMessages(detail.messages || []);
+      const turnFileChanges = aggregateTurnFileChanges(messages);
+      const visibleMessages = messages.filter((message) => message?.type !== "fileChange");
       const nextConversationKey = `${conversationKey(messages)}|older:${detail.nextCursor || ""}|loading:${state.loadingOlderHistory ? "1" : "0"}`;
       const trailingCommentaryIndex = (() => {
-        for (let index = messages.length - 1; index >= 0; index -= 1) {
-          const message = messages[index];
+        for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
+          const message = visibleMessages[index];
           if (message?.phase === "commentary") {
             return index;
           }
@@ -2095,7 +2988,7 @@ INDEX_HTML = """<!doctype html>
       const loadOlderMarkup = detail.nextCursor
         ? `<div class="history-loader"><button id="loadOlderButton" class="secondary group-toggle" type="button"${state.loadingOlderHistory ? " disabled" : ""}>${state.loadingOlderHistory ? "Loading..." : "Load older"}</button></div>`
         : "";
-      if (!messages.length) {
+      if (!visibleMessages.length) {
         conversation.innerHTML = `
           ${loadOlderMarkup}
           <div class="empty empty-state">No persisted transcript items yet.</div>
@@ -2113,7 +3006,19 @@ INDEX_HTML = """<!doctype html>
         }
         return;
       }
-      conversation.innerHTML = `${loadOlderMarkup}${messages.map((message, index) => `
+      const thinkingMarkup = shouldShowThinkingIndicator(detail, messages)
+        ? `
+          <div class="thinking-indicator">
+            <span>Thinking...</span>
+            <span class="thinking-dots" aria-hidden="true">
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+            </span>
+          </div>
+        `
+        : "";
+      conversation.innerHTML = `${loadOlderMarkup}${visibleMessages.map((message, index) => `
         <article class="bubble ${message.role} ${message.phase === "commentary" ? "commentary" : ""}">
           ${message.phase === "commentary" ? `
             <details class="commentary-details"${index === trailingCommentaryIndex ? " open" : ""}>
@@ -2129,9 +3034,10 @@ INDEX_HTML = """<!doctype html>
               <span>${escapeHtml(message.timestamp || "")}</span>
             </div>
             <div class="markdown">${renderMarkdown(message.text || "")}</div>
+            ${isLastRenderableFinalAssistantMessageForTurn(message, visibleMessages, index) && turnFileChanges.has(message.turnId || "") ? renderFileChangeCard(turnFileChanges.get(message.turnId || "")) : ""}
           `}
         </article>
-      `).join("")}`;
+      `).join("")}${thinkingMarkup}`;
       state.lastRenderedConversationKey = nextConversationKey;
       const loadOlderButton = document.getElementById("loadOlderButton");
       if (loadOlderButton) {
@@ -2282,8 +3188,11 @@ INDEX_HTML = """<!doctype html>
       state.sessions = data.sessions || [];
       const selectedSessionId = state.activeSessionId;
       const persistedSessionId = restoreActiveSessionPreference();
+      const requestedSessionId = sessionIdFromUrl();
       if (!state.draftSession) {
-        if (state.initialSelectionDone) {
+        if (requestedSessionId) {
+          state.activeSessionId = requestedSessionId;
+        } else if (state.initialSelectionDone) {
           const stillActive = state.activeSessionId && state.sessions.some((session) => session.id === state.activeSessionId);
           if (!stillActive) {
             state.activeSessionId = state.sessions.length ? newestActiveSessionId() : null;
@@ -2335,6 +3244,7 @@ INDEX_HTML = """<!doctype html>
       state.draftSession = null;
       state.activeSessionId = sessionId;
       persistActiveSessionPreference(sessionId);
+      updateSessionUrl(sessionId);
       state.activeSessionDetail = null;
       state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
@@ -2498,6 +3408,7 @@ INDEX_HTML = """<!doctype html>
       };
       state.activeSessionId = null;
       persistActiveSessionPreference(null);
+      updateSessionUrl(null);
       ensureEventSource(null);
       renderSessions();
       renderDraftSession();
@@ -2569,10 +3480,14 @@ INDEX_HTML = """<!doctype html>
         state.unseenSessionIds[threadId] = true;
         renderSessions();
       }
-      if (method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/")) {
+      let handledIncrementally = false;
+      if (affectsActive) {
+        handledIncrementally = applyIncrementalLiveEvent(payload);
+      }
+      if (shouldRefreshSessionListForEvent(method)) {
         scheduleSessionListReload();
       }
-      if (affectsActive && (method.startsWith("thread/") || method.startsWith("turn/") || method.startsWith("item/"))) {
+      if (affectsActive && !handledIncrementally && shouldRefreshActiveSessionForEvent(method)) {
         scheduleActiveSessionReload();
       }
     }
@@ -2596,7 +3511,7 @@ INDEX_HTML = """<!doctype html>
     function ensurePolling() {
       if (!state.activePollTimer) {
         state.activePollTimer = setInterval(() => {
-          if (!document.hidden) {
+          if (!document.hidden && !state.eventSourceHealthy) {
             refreshActiveSessionSilently();
           }
         }, 1500);
@@ -2626,6 +3541,18 @@ INDEX_HTML = """<!doctype html>
       updateInstallButtonVisibility();
       await prompt.prompt();
       await prompt.userChoice.catch(() => null);
+    });
+    notificationsActionButton.addEventListener("click", () => {
+      toggleNotifications().catch(() => {});
+    });
+    document.addEventListener("click", (event) => {
+      if (!notificationsMenu.open) {
+        return;
+      }
+      if (notificationsMenu.contains(event.target)) {
+        return;
+      }
+      notificationsMenu.open = false;
     });
     promptInput.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" || event.shiftKey) {
@@ -2670,6 +3597,20 @@ INDEX_HTML = """<!doctype html>
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("/sw.js").catch(() => {});
       });
+      navigator.serviceWorker.addEventListener("message", (event) => {
+        const payload = event.data || {};
+        if (payload.type !== "redex-open-session") {
+          return;
+        }
+        const sessionId = typeof payload.sessionId === "string" ? payload.sessionId.trim() : "";
+        if (!sessionId) {
+          return;
+        }
+        updateSessionUrl(sessionId);
+        loadSession(sessionId).catch((error) => {
+          sessionTitle.textContent = error.message || String(error);
+        });
+      });
     }
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", syncViewportHeight);
@@ -2679,6 +3620,8 @@ INDEX_HTML = """<!doctype html>
     syncViewportHeight();
     updateConnectionBadge();
     updateInstallButtonVisibility();
+    updateNotificationsButton();
+    syncNotificationsState().catch(() => {});
     loadSessions().catch((error) => {
       sessionTitle.textContent = error.message || String(error);
     });
@@ -2694,9 +3637,155 @@ class BridgeConfig:
     default_cwd: str | None
 
 
-class LiveEventHub:
-    def __init__(self, app_server_url: str | None) -> None:
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _load_or_create_web_push_config() -> dict[str, str]:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = json.loads(WEB_PUSH_CONFIG_PATH.read_text(encoding="utf-8"))
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("publicKey"), str)
+            and isinstance(payload.get("privateKeyPem"), str)
+        ):
+            return {
+                "publicKey": payload["publicKey"],
+                "privateKeyPem": payload["privateKeyPem"],
+            }
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_numbers = private_key.private_numbers()
+    public_numbers = private_numbers.public_numbers
+    public_key_bytes = b"\x04" + public_numbers.x.to_bytes(32, "big") + public_numbers.y.to_bytes(32, "big")
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    payload = {
+        "publicKey": _b64url_encode(public_key_bytes),
+        "privateKeyPem": private_key_pem,
+    }
+    WEB_PUSH_CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+class PushSubscriptionStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._load())
+
+    def upsert(self, subscription: dict[str, Any]) -> None:
+        endpoint = subscription.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint:
+            raise ValueError("Push subscription must include an endpoint.")
+        with self._lock:
+            subscriptions = [entry for entry in self._load() if entry.get("endpoint") != endpoint]
+            subscriptions.append(subscription)
+            self._save(subscriptions)
+
+    def remove(self, endpoint: str) -> None:
+        if not endpoint:
+            return
+        with self._lock:
+            subscriptions = [entry for entry in self._load() if entry.get("endpoint") != endpoint]
+            self._save(subscriptions)
+
+    def _load(self) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [entry for entry in payload if isinstance(entry, dict)]
+
+    def _save(self, subscriptions: list[dict[str, Any]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(subscriptions, indent=2), encoding="utf-8")
+
+
+class PushNotifier:
+    def __init__(self, app_server_url: str | None, subscription_store: PushSubscriptionStore) -> None:
         self.app_server_url = app_server_url
+        self.subscription_store = subscription_store
+        self.web_push_config = _load_or_create_web_push_config()
+        self._lock = threading.Lock()
+        self._recent_turn_ids: deque[str] = deque(maxlen=200)
+
+    @property
+    def public_key(self) -> str:
+        return self.web_push_config["publicKey"]
+
+    def subscription_status(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.subscription_store.list()),
+            "count": len(self.subscription_store.list()),
+            "publicKey": self.public_key,
+        }
+
+    def notify_final_response(self, thread_id: str, turn_id: str) -> None:
+        if not thread_id or not turn_id:
+            return
+        with self._lock:
+            if turn_id in self._recent_turn_ids:
+                return
+            self._recent_turn_ids.append(turn_id)
+        subscriptions = self.subscription_store.list()
+        if not subscriptions:
+            return
+        title = "Codex replied"
+        body = "A session has a new final response."
+        try:
+            with CodexAppServerClient(self.app_server_url) as client:
+                thread = client.get_session(thread_id, include_turns=False).get("thread")
+                if isinstance(thread, dict):
+                    thread_title = normalize_thread(thread).get("title")
+                    if isinstance(thread_title, str) and thread_title.strip():
+                        body = thread_title.strip()
+        except CodexAppServerError:
+            pass
+        payload = json.dumps(
+            {
+                "title": title,
+                "body": body,
+                "url": f"/?session={thread_id}",
+                "threadId": thread_id,
+                "turnId": turn_id,
+            }
+        )
+        vapid_claims = {"sub": "mailto:redex@local"}
+        for subscription in subscriptions:
+            try:
+                webpush(
+                    subscription_info=subscription,
+                    data=payload,
+                    vapid_private_key=self.web_push_config["privateKeyPem"],
+                    vapid_claims=vapid_claims,
+                )
+            except WebPushException:
+                endpoint = subscription.get("endpoint")
+                if isinstance(endpoint, str):
+                    self.subscription_store.remove(endpoint)
+
+
+class LiveEventHub:
+    def __init__(
+        self,
+        app_server_url: str | None,
+        *,
+        notification_observer: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        self.app_server_url = app_server_url
+        self.notification_observer = notification_observer
         self._events: deque[dict[str, Any]] = deque(maxlen=EVENT_BACKLOG_LIMIT)
         self._condition = threading.Condition()
         self._pending_subscriptions: set[str] = set()
@@ -2783,6 +3872,11 @@ class LiveEventHub:
         if not isinstance(method, str):
             return
         params = message.get("params")
+        if self.notification_observer is not None and isinstance(params, dict):
+            try:
+                self.notification_observer(method, params)
+            except Exception:
+                pass
         self._publish(method, params if isinstance(params, dict) else {})
 
     def _publish(self, method: str, params: dict[str, Any] | None = None) -> None:
@@ -2804,7 +3898,28 @@ class RedexHttpServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], config: BridgeConfig) -> None:
         super().__init__(server_address, RedexHandler)
         self.config = config
-        self.live_event_hub = LiveEventHub(config.app_server_url)
+        self.push_subscription_store = PushSubscriptionStore(WEB_PUSH_SUBSCRIPTIONS_PATH)
+        self.push_notifier = PushNotifier(config.app_server_url, self.push_subscription_store)
+        self.live_event_hub = LiveEventHub(
+            config.app_server_url,
+            notification_observer=self._observe_notification,
+        )
+
+    def _observe_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method != "item/completed":
+            return
+        item = params.get("item")
+        if not isinstance(item, dict):
+            return
+        if item.get("type") != "agentMessage":
+            return
+        if str(item.get("phase") or "").lower() != "final_answer":
+            return
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        if not isinstance(thread_id, str) or not isinstance(turn_id, str):
+            return
+        self.push_notifier.notify_final_response(thread_id, turn_id)
 
 
 class RedexHandler(BaseHTTPRequestHandler):
@@ -2885,6 +4000,9 @@ class RedexHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/events":
             self._handle_events(parsed.query)
             return
+        if parsed.path == "/api/notifications":
+            self._handle_notifications_status()
+            return
         if parsed.path.startswith("/api/sessions/"):
             session_id = parsed.path.removeprefix("/api/sessions/")
             self._handle_get_session(session_id)
@@ -2900,6 +4018,12 @@ class RedexHandler(BaseHTTPRequestHandler):
             prefix = "/api/sessions/"
             session_id = parsed.path[len(prefix) : -len("/prompt")]
             self._handle_send_prompt(session_id)
+            return
+        if parsed.path == "/api/notifications/subscribe":
+            self._handle_notifications_subscribe()
+            return
+        if parsed.path == "/api/notifications/unsubscribe":
+            self._handle_notifications_unsubscribe()
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -2926,6 +4050,10 @@ class RedexHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(exc)})
             return
         self._send_json(HTTPStatus.OK, {"ok": True})
+
+    def _handle_notifications_status(self) -> None:
+        status = self.server.push_notifier.subscription_status()
+        self._send_json(HTTPStatus.OK, status)
 
     def _handle_manifest(self) -> None:
         body = MANIFEST_JSON.encode("utf-8")
@@ -3142,6 +4270,36 @@ class RedexHandler(BaseHTTPRequestHandler):
                 "status": status,
             },
         )
+
+    def _handle_notifications_subscribe(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        subscription = payload.get("subscription")
+        if not isinstance(subscription, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Body must include `subscription` object."})
+            return
+        try:
+            self.server.push_subscription_store.upsert(subscription)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, self.server.push_notifier.subscription_status())
+
+    def _handle_notifications_unsubscribe(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        endpoint = payload.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Body must include non-empty string field `endpoint`."})
+            return
+        self.server.push_subscription_store.remove(endpoint)
+        self._send_json(HTTPStatus.OK, self.server.push_notifier.subscription_status())
 
     def _client(self) -> CodexAppServerClient:
         return CodexAppServerClient(self.server.config.app_server_url)

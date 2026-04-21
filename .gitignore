@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 *.pyc
 *.egg-info/
+*.ts.net.crt
+*.ts.net.key
+tmp-redex-inline.js

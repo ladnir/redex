@@ -20,7 +20,6 @@ from websocket import create_connection
 
 NOTIFICATIONS_TO_OPT_OUT = [
     "command/exec/outputDelta",
-    "item/agentMessage/delta",
     "item/plan/delta",
     "item/fileChange/outputDelta",
     "item/reasoning/summaryTextDelta",
@@ -108,6 +107,55 @@ def _extract_text_chunks(chunks: list[dict[str, Any]]) -> str:
         if isinstance(text, str) and text:
             parts.append(text.rstrip())
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def _diff_stats(diff: str | None) -> tuple[int, int]:
+    if not isinstance(diff, str) or not diff:
+        return 0, 0
+    added = 0
+    deleted = 0
+    for line in diff.splitlines():
+        if not line:
+            continue
+        if line.startswith("+++ ") or line.startswith("--- ") or line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            deleted += 1
+    return added, deleted
+
+
+def _normalize_file_changes(changes: Any) -> tuple[list[dict[str, Any]], int, int]:
+    if not isinstance(changes, list):
+        return [], 0, 0
+    normalized: list[dict[str, Any]] = []
+    total_added = 0
+    total_deleted = 0
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        path = change.get("path")
+        kind = change.get("kind")
+        diff = change.get("diff")
+        if not isinstance(path, str):
+            continue
+        kind_type = kind.get("type") if isinstance(kind, dict) else None
+        move_path = kind.get("move_path") if isinstance(kind, dict) else None
+        added, deleted = _diff_stats(diff if isinstance(diff, str) else None)
+        total_added += added
+        total_deleted += deleted
+        normalized.append(
+            {
+                "path": path,
+                "kind": kind_type,
+                "movePath": move_path if isinstance(move_path, str) else None,
+                "diff": diff if isinstance(diff, str) else "",
+                "added": added,
+                "deleted": deleted,
+            }
+        )
+    return normalized, total_added, total_deleted
 
 
 def _sandbox_mode_from_policy(policy: Any) -> str | None:
@@ -279,6 +327,29 @@ def normalize_turns(thread: dict[str, Any]) -> list[dict[str, Any]]:
                         "role": "assistant",
                         "phase": item.get("phase"),
                         "text": text.rstrip(),
+                    }
+                )
+            elif item_type == "fileChange":
+                changes, added, deleted = _normalize_file_changes(item.get("changes"))
+                if not changes:
+                    continue
+                messages.append(
+                    {
+                        "itemId": item.get("id"),
+                        "turnId": turn_id,
+                        "turnStatus": turn_status,
+                        "timestamp": started_at,
+                        "role": "assistant",
+                        "phase": None,
+                        "type": "fileChange",
+                        "fileChangeStatus": item.get("status"),
+                        "changes": changes,
+                        "changeSummary": {
+                            "files": len(changes),
+                            "added": added,
+                            "deleted": deleted,
+                        },
+                        "text": "",
                     }
                 )
     return messages
