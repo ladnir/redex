@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import queue
 import threading
 import time
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
@@ -23,6 +25,7 @@ from .app_server import normalize_thread
 
 
 EVENT_BACKLOG_LIMIT = 500
+ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 
 INDEX_HTML = """<!doctype html>
@@ -89,16 +92,37 @@ INDEX_HTML = """<!doctype html>
       justify-content: space-between;
       gap: 0.75rem;
     }
-    .hero h1 {
-      margin: 0;
-      font-size: 1.15rem;
-      letter-spacing: -0.03em;
-    }
     .hero-copy {
       display: flex;
       align-items: center;
       gap: 0.7rem;
       min-width: 0;
+    }
+    .hero-wordmark {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.68rem;
+      min-width: 0;
+    }
+    .hero-mark {
+      width: 2rem;
+      height: 2rem;
+      flex: 0 0 auto;
+      display: block;
+    }
+    .hero-title {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0;
+      font-size: 1.18rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      color: var(--ink);
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .hero-title-accent {
+      color: #7fb0de;
     }
     .stat-pill {
       display: flex;
@@ -733,7 +757,19 @@ INDEX_HTML = """<!doctype html>
     <section class="panel hero">
       <div class="hero-grid">
         <div class="hero-copy">
-          <h1>Redex</h1>
+          <div class="hero-wordmark" aria-label="Redex">
+            <svg class="hero-mark" viewBox="0 0 64 64" aria-hidden="true">
+              <path d="M22 14 L8 32 L22 50" fill="none" stroke="#f8fbff" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M42 14 L56 32 L42 50" fill="none" stroke="#7fb0de" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="32" cy="18" r="3.6" fill="#f8fbff"/>
+              <circle cx="32" cy="46" r="4.8" fill="#7fb0de"/>
+              <path d="M25 46 A 7 7 0 0 1 39 46" fill="none" stroke="#7fb0de" stroke-width="2.1" stroke-linecap="round" opacity="0.95"/>
+              <path d="M19 46 A 13 13 0 0 1 45 46" fill="none" stroke="#7fb0de" stroke-width="1.9" stroke-linecap="round" opacity="0.48"/>
+            </svg>
+            <span class="hero-title">
+              <span>re</span><span class="hero-title-accent">dex</span>
+            </span>
+          </div>
           <div class="stat-pill">
             <span class="stat-label">Runtime</span>
             <span id="connectionBadge" class="stat-value">Connecting</span>
@@ -796,6 +832,9 @@ INDEX_HTML = """<!doctype html>
       draftSession: null,
       initialSelectionDone: false,
       unseenSessionIds: {},
+      lastRenderedSessionId: null,
+      lastRenderedMetaKey: null,
+      lastRenderedConversationKey: null,
       defaultCwd: "__DEFAULT_CWD__",
       searchQuery: "",
       expandedGroups: {},
@@ -1152,6 +1191,27 @@ INDEX_HTML = """<!doctype html>
       return count;
     }
 
+    function sessionMetaKey(session) {
+      return JSON.stringify({
+        id: session.id || "",
+        title: session.title || "",
+        status: session.status || "",
+        cwd: session.cwd || "",
+        updatedAt: session.updatedAt || "",
+      });
+    }
+
+    function conversationKey(messages) {
+      return JSON.stringify((messages || []).map((message) => [
+        message.turnId || "",
+        message.turnStatus || "",
+        message.timestamp || "",
+        message.role || "",
+        message.phase || "",
+        message.text || "",
+      ]));
+    }
+
     function renderSessions() {
       const groups = groupedSessions();
       updateSessionCount();
@@ -1249,9 +1309,23 @@ INDEX_HTML = """<!doctype html>
 
     function renderConversation(detail, forceStick = false) {
       const messages = coalescedMessages(detail.messages || []);
-      const shouldStick = forceStick || (conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 120);
+      const nextConversationKey = conversationKey(messages);
+      if (
+        !forceStick &&
+        state.lastRenderedSessionId === state.activeSessionId &&
+        state.lastRenderedConversationKey === nextConversationKey
+      ) {
+        return;
+      }
+      const previousScrollTop = conversation.scrollTop;
       if (!messages.length) {
         conversation.innerHTML = '<div class="empty empty-state">No persisted transcript items yet.</div>';
+        state.lastRenderedConversationKey = nextConversationKey;
+        if (forceStick) {
+          requestAnimationFrame(() => {
+            conversation.scrollTop = conversation.scrollHeight;
+          });
+        }
         return;
       }
       conversation.innerHTML = messages.map((message) => `
@@ -1273,20 +1347,18 @@ INDEX_HTML = """<!doctype html>
           `}
         </article>
       `).join("");
+      state.lastRenderedConversationKey = nextConversationKey;
       if (transcriptNeedsMath(messages)) {
         ensureMathJax();
       }
-      if (shouldStick) {
+      if (forceStick) {
         requestAnimationFrame(() => {
           conversation.scrollTop = conversation.scrollHeight;
-          maybeTypesetMath().finally(() => {
-            requestAnimationFrame(() => {
-              conversation.scrollTop = conversation.scrollHeight;
-            });
-          });
+          maybeTypesetMath();
         });
       } else {
         requestAnimationFrame(() => {
+          conversation.scrollTop = previousScrollTop;
           maybeTypesetMath();
         });
       }
@@ -1294,35 +1366,47 @@ INDEX_HTML = """<!doctype html>
 
     function renderSessionDetail(detail, forceStick = false) {
       const session = detail.session || {};
-      sessionTitle.textContent = session.title || session.id || "Session";
-      sessionMeta.innerHTML = `
-        <details class="meta-details">
-          <summary class="meta-summary">Session details</summary>
-          <div class="detail-strip" style="margin-top:0.5rem; margin-bottom:0;">
-            <div class="detail-chip">
-              <span class="detail-chip-label">Status</span>
-              <span class="detail-chip-value">${escapeHtml(session.status || "unknown")}</span>
+      const nextMetaKey = sessionMetaKey(session);
+      if (
+        forceStick ||
+        state.lastRenderedSessionId !== session.id ||
+        state.lastRenderedMetaKey !== nextMetaKey
+      ) {
+        sessionTitle.textContent = session.title || session.id || "Session";
+        sessionMeta.innerHTML = `
+          <details class="meta-details">
+            <summary class="meta-summary">Session details</summary>
+            <div class="detail-strip" style="margin-top:0.5rem; margin-bottom:0;">
+              <div class="detail-chip">
+                <span class="detail-chip-label">Status</span>
+                <span class="detail-chip-value">${escapeHtml(session.status || "unknown")}</span>
+              </div>
+              <div class="detail-chip">
+                <span class="detail-chip-label">Workspace</span>
+                <span class="detail-chip-value">${escapeHtml(session.cwd || "all workspaces")}</span>
+              </div>
+              <div class="detail-chip">
+                <span class="detail-chip-label">Updated</span>
+                <span class="detail-chip-value">${escapeHtml(session.updatedAt || "unknown")}</span>
+              </div>
+              <div class="detail-chip">
+                <span class="detail-chip-label">Thread</span>
+                <span class="detail-chip-value mono">${escapeHtml(session.id || "")}</span>
+              </div>
             </div>
-            <div class="detail-chip">
-              <span class="detail-chip-label">Workspace</span>
-              <span class="detail-chip-value">${escapeHtml(session.cwd || "all workspaces")}</span>
-            </div>
-            <div class="detail-chip">
-              <span class="detail-chip-label">Updated</span>
-              <span class="detail-chip-value">${escapeHtml(session.updatedAt || "unknown")}</span>
-            </div>
-            <div class="detail-chip">
-              <span class="detail-chip-label">Thread</span>
-              <span class="detail-chip-value mono">${escapeHtml(session.id || "")}</span>
-            </div>
-          </div>
-        </details>
-      `;
+          </details>
+        `;
+        state.lastRenderedMetaKey = nextMetaKey;
+      }
+      state.lastRenderedSessionId = session.id || null;
       renderConversation(detail, forceStick);
     }
 
     function renderDraftSession() {
       const draft = state.draftSession;
+      state.lastRenderedSessionId = null;
+      state.lastRenderedMetaKey = null;
+      state.lastRenderedConversationKey = null;
       sessionTitle.textContent = "New chat";
       sessionMeta.innerHTML = draft ? `
         <details class="meta-details">
@@ -1401,6 +1485,9 @@ INDEX_HTML = """<!doctype html>
     async function loadSession(sessionId) {
       state.draftSession = null;
       state.activeSessionId = sessionId;
+      state.lastRenderedSessionId = null;
+      state.lastRenderedMetaKey = null;
+      state.lastRenderedConversationKey = null;
       if (sessionId) {
         delete state.unseenSessionIds[sessionId];
       }
@@ -1792,6 +1879,9 @@ class RedexHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/assets/"):
+            self._handle_asset(parsed.path)
+            return
         if parsed.path == "/":
             self._handle_index()
             return
@@ -1845,6 +1935,34 @@ class RedexHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(exc)})
             return
         self._send_json(HTTPStatus.OK, {"ok": True})
+
+    def _handle_asset(self, path: str) -> None:
+        relative = path.removeprefix("/assets/").strip()
+        if not relative:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            return
+        asset_path = (ASSETS_DIR / relative).resolve()
+        try:
+            asset_path.relative_to(ASSETS_DIR.resolve())
+        except ValueError:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            return
+        if not asset_path.is_file():
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            return
+        try:
+            body = asset_path.read_bytes()
+        except OSError:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Could not read asset"})
+            return
+        content_type, _ = mimetypes.guess_type(str(asset_path))
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", content_type or "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_list_sessions(self, raw_query: str) -> None:
         query = parse_qs(raw_query)
