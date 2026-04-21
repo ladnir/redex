@@ -1,3 +1,5 @@
+![Redex logo](assets/redex-logo.svg)
+
 # Redex
 
 `redex` is an external control surface for Codex desktop sessions.

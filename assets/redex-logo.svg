@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 450 120" width="100%" height="100%">
+  <defs>
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#2563EB" />
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#DBEAFE" />
+    </linearGradient>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#0A1220" rx="12"/>
+
+  <g transform="translate(30, 25)">
+    <path d="M 20 5 L 0 35 L 20 65" fill="none" stroke="#7DD3FC" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 50 5 L 70 35 L 50 65" fill="none" stroke="#7DD3FC" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="35" cy="15" r="5" fill="#93C5FD" />
+    <circle cx="35" cy="55" r="8" fill="url(#blueGrad)" />
+    <path d="M 35 25 L 35 43" stroke="url(#blueGrad)" stroke-width="3" stroke-dasharray="4 4" stroke-linecap="round"/>
+    <path d="M 23 55 A 12 12 0 0 1 47 55" fill="none" stroke="url(#blueGrad)" stroke-width="2" stroke-linecap="round" opacity="0.85"/>
+    <path d="M 17 55 A 18 18 0 0 1 53 55" fill="none" stroke="url(#blueGrad)" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+  </g>
+
+  <text x="125" y="70" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="48" font-weight="900" fill="url(#textGrad)">
+    re<tspan fill="url(#blueGrad)">dex</tspan>
+  </text>
+
+  <text x="128" y="95" font-family="'Courier New', Courier, monospace" font-size="14" fill="#93A4B8" letter-spacing="1.5">
+    // local codex relay
+  </text>
+</svg>
