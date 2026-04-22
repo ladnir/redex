@@ -290,6 +290,18 @@ class FakeCodexScenario:
 
         notifications = [
             {
+                "method": "item/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "item": {
+                        "id": user_item_id,
+                        "type": "userMessage",
+                        "content": _text_content(text),
+                    },
+                },
+            },
+            {
                 "method": "item/started",
                 "params": {
                     "threadId": thread_id,
@@ -463,6 +475,31 @@ class FakeCodexAppServer:
         future = asyncio.run_coroutine_threadsafe(self._trigger_turn(thread_id, text), self._loop)
         return future.result(timeout=5)
 
+    def trigger_stream(
+        self,
+        thread_id: str,
+        *,
+        prompt_text: str,
+        deltas: list[str],
+        final_text: str,
+        phase: str = "final_answer",
+        delay_seconds: float = 0.05,
+    ) -> None:
+        if self._loop is None:
+            raise RuntimeError("Fake Codex app-server is not running.")
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(
+                self._trigger_stream(
+                    thread_id,
+                    prompt_text=prompt_text,
+                    deltas=deltas,
+                    final_text=final_text,
+                    phase=phase,
+                    delay_seconds=delay_seconds,
+                )
+            )
+        )
+
     def reset(self, scenario: FakeCodexScenario) -> None:
         if self._loop is None:
             raise RuntimeError("Fake Codex app-server is not running.")
@@ -482,6 +519,133 @@ class FakeCodexAppServer:
         result, notifications = self.scenario.start_turn(thread_id, text)
         await self._broadcast_notifications(thread_id, notifications)
         return result
+
+    async def _trigger_stream(
+        self,
+        thread_id: str,
+        *,
+        prompt_text: str,
+        deltas: list[str],
+        final_text: str,
+        phase: str,
+        delay_seconds: float,
+    ) -> None:
+        turn_id = f"turn-{uuid.uuid4().hex[:8]}"
+        user_item_id = f"user-{uuid.uuid4().hex[:8]}"
+        assistant_item_id = f"assistant-{uuid.uuid4().hex[:8]}"
+        with self.scenario._lock:
+            thread = self.scenario.threads[thread_id]
+            turn = make_turn(
+                turn_id=turn_id,
+                status="running",
+                items=[
+                    make_user_item(item_id=user_item_id, text=prompt_text),
+                    {
+                        "id": assistant_item_id,
+                        "type": "agentMessage",
+                        "phase": phase,
+                        "text": "",
+                    },
+                ],
+            )
+            thread.setdefault("turns", []).append(turn)
+            thread["preview"] = prompt_text
+            thread["updatedAt"] = _now()
+
+        await self._broadcast_notifications(
+            thread_id,
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": {
+                            "id": user_item_id,
+                            "type": "userMessage",
+                            "content": _text_content(prompt_text),
+                        },
+                    },
+                },
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": {
+                            "id": assistant_item_id,
+                            "type": "agentMessage",
+                            "phase": phase,
+                            "text": "",
+                        },
+                    },
+                }
+            ],
+        )
+
+        accumulated = ""
+        for chunk in deltas:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            accumulated += chunk
+            await self._broadcast_notifications(
+                thread_id,
+                [
+                    {
+                        "method": "item/agentMessage/delta",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "itemId": assistant_item_id,
+                            "delta": chunk,
+                        },
+                    }
+                ],
+            )
+
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+        with self.scenario._lock:
+            thread = self.scenario.threads[thread_id]
+            turn = next((candidate for candidate in thread.get("turns", []) if candidate.get("id") == turn_id), None)
+            if turn is not None:
+                turn["status"] = "completed"
+                for item in turn.get("items", []):
+                    if item.get("id") == assistant_item_id:
+                        item["text"] = final_text
+            thread["preview"] = prompt_text
+            thread["updatedAt"] = _now()
+
+        await self._broadcast_notifications(
+            thread_id,
+            [
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "item": {
+                            "id": assistant_item_id,
+                            "type": "agentMessage",
+                            "phase": phase,
+                            "text": final_text,
+                        },
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": thread_id,
+                        "turn": {
+                            "id": turn_id,
+                            "threadId": thread_id,
+                            "status": "completed",
+                        },
+                    },
+                },
+            ],
+        )
 
     async def _reset(self, scenario: FakeCodexScenario) -> None:
         self.scenario = scenario

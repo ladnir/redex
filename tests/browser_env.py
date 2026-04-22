@@ -184,6 +184,43 @@ class BrowserControlHandler(BaseHTTPRequestHandler):
             self.server.upstream.queue_delay(method=method, seconds=float(seconds), thread_id=thread_id)
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
+        if self.path == "/stream":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            thread_id = payload.get("threadId")
+            prompt_text = payload.get("promptText")
+            deltas = payload.get("deltas")
+            final_text = payload.get("finalText")
+            phase = payload.get("phase", "final_answer")
+            delay_seconds = payload.get("delaySeconds", 0.05)
+            if not isinstance(thread_id, str) or not thread_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`threadId` is required."})
+                return
+            if not isinstance(prompt_text, str):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`promptText` must be a string."})
+                return
+            if not isinstance(deltas, list) or not all(isinstance(chunk, str) for chunk in deltas):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`deltas` must be an array of strings."})
+                return
+            if not isinstance(final_text, str):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`finalText` must be a string."})
+                return
+            if not isinstance(phase, str) or not phase:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`phase` must be a non-empty string."})
+                return
+            if not isinstance(delay_seconds, (int, float)) or delay_seconds < 0:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "`delaySeconds` must be a non-negative number."})
+                return
+            self.server.upstream.trigger_stream(
+                thread_id,
+                prompt_text=prompt_text,
+                deltas=list(deltas),
+                final_text=final_text,
+                phase=phase,
+                delay_seconds=float(delay_seconds),
+            )
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:

@@ -80,7 +80,7 @@ class BridgeIntegrationTests(unittest.TestCase):
                     host,
                     port,
                     "/api/events?sessionId=thread-1",
-                    max_events=8,
+                    max_events=10,
                     timeout=8.0,
                     stop_methods={"turn/completed"},
                 )

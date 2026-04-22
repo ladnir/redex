@@ -1624,6 +1624,14 @@ INDEX_HTML = """<!doctype html>
       sessionReloadTimer: null,
       activePollTimer: null,
       sessionPollTimer: null,
+      pendingStreamingItemIds: new Set(),
+      streamFlushHandle: 0,
+      streamingItemIds: {},
+      liveMetricEvents: [],
+      firstStreamDeltaAt: {},
+      firstStreamPaintLatencyMs: {},
+      completionReceivedAt: {},
+      completionPaintLatencyMs: {},
       deferredInstallPrompt: null,
       notificationsSupported: false,
       notificationsEnabled: false,
@@ -1675,6 +1683,13 @@ INDEX_HTML = """<!doctype html>
 
     function cloneJson(value) {
       return JSON.parse(JSON.stringify(value));
+    }
+
+    function cssEscape(value) {
+      if (window.CSS && typeof window.CSS.escape === "function") {
+        return window.CSS.escape(String(value ?? ""));
+      }
+      return String(value ?? "").replace(/[^a-zA-Z0-9_-]/g, "\\$&");
     }
 
     function shortId(id) {
@@ -2693,6 +2708,32 @@ INDEX_HTML = """<!doctype html>
       });
     }
 
+    function resetStreamingState() {
+      state.pendingStreamingItemIds.clear();
+      state.streamingItemIds = {};
+      state.firstStreamDeltaAt = {};
+      state.firstStreamPaintLatencyMs = {};
+      state.completionReceivedAt = {};
+      state.completionPaintLatencyMs = {};
+      if (state.streamFlushHandle) {
+        cancelAnimationFrame(state.streamFlushHandle);
+        state.streamFlushHandle = 0;
+      }
+    }
+
+    function recordLiveMetric(kind, data = {}) {
+      const entry = {
+        kind,
+        at: performance.now(),
+        ...data,
+      };
+      state.liveMetricEvents.push(entry);
+      if (state.liveMetricEvents.length > 200) {
+        state.liveMetricEvents.splice(0, state.liveMetricEvents.length - 200);
+      }
+      return entry;
+    }
+
     function cachedSessionDetail(sessionId) {
       if (!sessionId) {
         return null;
@@ -2729,6 +2770,24 @@ INDEX_HTML = """<!doctype html>
       };
     }
 
+    function upsertLiveMessageInPlace(detail, message) {
+      const messages = detail.messages || (detail.messages = []);
+      const index = messages.findIndex((entry) => entry.itemId && entry.itemId === message.itemId);
+      if (index >= 0) {
+        messages[index] = {
+          ...messages[index],
+          ...message,
+          timestamp: message.timestamp || messages[index].timestamp || "",
+          turnStatus: message.turnStatus || messages[index].turnStatus || "",
+          phase: message.phase ?? messages[index].phase ?? null,
+          text: typeof message.text === "string" && message.text.length ? message.text : (messages[index].text || ""),
+        };
+      } else {
+        messages.push(message);
+      }
+      return detail;
+    }
+
     function appendLiveAgentDelta(detail, params) {
       const itemId = params.itemId || "";
       const delta = typeof params.delta === "string" ? params.delta : "";
@@ -2759,6 +2818,142 @@ INDEX_HTML = """<!doctype html>
       };
     }
 
+    function appendLiveAgentDeltaInPlace(detail, params) {
+      const itemId = params.itemId || "";
+      const delta = typeof params.delta === "string" ? params.delta : "";
+      if (!itemId || !delta) {
+        return detail;
+      }
+      const messages = detail.messages || (detail.messages = []);
+      const index = messages.findIndex((entry) => entry.itemId && entry.itemId === itemId);
+      if (index >= 0) {
+        messages[index] = {
+          ...messages[index],
+          text: `${messages[index].text || ""}${delta}`,
+        };
+      } else {
+        messages.push({
+          itemId,
+          turnId: params.turnId || "",
+          turnStatus: "",
+          timestamp: "",
+          role: "assistant",
+          phase: null,
+          text: delta,
+        });
+      }
+      return detail;
+    }
+
+    function findMessageByItemId(detail, itemId) {
+      if (!detail || !itemId) {
+        return null;
+      }
+      return (detail.messages || []).find((message) => message?.itemId === itemId) || null;
+    }
+
+    function markStreamingItem(itemId, streaming = true) {
+      if (!itemId) {
+        return;
+      }
+      if (streaming) {
+        state.streamingItemIds[itemId] = true;
+      } else {
+        delete state.streamingItemIds[itemId];
+      }
+    }
+
+    function renderStreamingText(text) {
+      return escapeHtml(text || "").replaceAll("\\n", "<br>");
+    }
+
+    function renderMessageBodyHtml(message) {
+      if (message?.itemId && state.streamingItemIds[message.itemId]) {
+        return renderStreamingText(message.text || "");
+      }
+      return renderMarkdown(message.text || "");
+    }
+
+    function noteFirstStreamDelta(itemId) {
+      if (!itemId || state.firstStreamDeltaAt[itemId] !== undefined) {
+        return;
+      }
+      const metric = recordLiveMetric("stream-delta-received", { itemId });
+      state.firstStreamDeltaAt[itemId] = metric.at;
+    }
+
+    function noteFirstStreamPaint(itemId) {
+      if (!itemId || state.firstStreamPaintLatencyMs[itemId] !== undefined) {
+        return;
+      }
+      const startedAt = state.firstStreamDeltaAt[itemId];
+      if (startedAt === undefined) {
+        return;
+      }
+      const metric = recordLiveMetric("stream-delta-painted", { itemId });
+      state.firstStreamPaintLatencyMs[itemId] = metric.at - startedAt;
+    }
+
+    function noteCompletionReceived(itemId) {
+      if (!itemId) {
+        return;
+      }
+      const metric = recordLiveMetric("stream-completion-received", { itemId });
+      state.completionReceivedAt[itemId] = metric.at;
+    }
+
+    function noteCompletionPaint(itemId) {
+      if (!itemId || state.completionPaintLatencyMs[itemId] !== undefined) {
+        return;
+      }
+      const startedAt = state.completionReceivedAt[itemId];
+      if (startedAt === undefined) {
+        return;
+      }
+      const metric = recordLiveMetric("stream-completion-painted", { itemId });
+      state.completionPaintLatencyMs[itemId] = metric.at - startedAt;
+    }
+
+    function scheduleStreamingFlush() {
+      if (state.streamFlushHandle) {
+        return;
+      }
+      state.streamFlushHandle = requestAnimationFrame(() => {
+        state.streamFlushHandle = 0;
+        flushStreamingMessages();
+      });
+    }
+
+    function flushStreamingMessages() {
+      if (!state.activeSessionDetail || !state.activeSessionId || !state.pendingStreamingItemIds.size) {
+        return;
+      }
+      const shouldStick = conversationDistanceFromEnd() <= 56;
+      let needsFullRender = false;
+      for (const itemId of Array.from(state.pendingStreamingItemIds)) {
+        state.pendingStreamingItemIds.delete(itemId);
+        const message = findMessageByItemId(state.activeSessionDetail, itemId);
+        if (!message) {
+          continue;
+        }
+        const node = conversation.querySelector(`[data-message-item-id="${cssEscape(itemId)}"]`);
+        if (!node) {
+          needsFullRender = true;
+          continue;
+        }
+        node.innerHTML = renderMessageBodyHtml(message);
+        noteFirstStreamPaint(itemId);
+      }
+      if (needsFullRender) {
+        renderActiveSessionFromLiveUpdate(state.activeSessionDetail);
+        return;
+      }
+      if (shouldStick) {
+        conversation.scrollTop = conversation.scrollHeight;
+      }
+      updateScrollToEndButton();
+    }
+
     function renderActiveSessionFromLiveUpdate(nextDetail) {
       if (!nextDetail) {
         return;
@@ -2778,8 +2973,11 @@ INDEX_HTML = """<!doctype html>
         return false;
       }
       if (method === "item/agentMessage/delta") {
-        const nextDetail = appendLiveAgentDelta(cloneJson(state.activeSessionDetail), params);
-        renderActiveSessionFromLiveUpdate(nextDetail);
+        appendLiveAgentDeltaInPlace(state.activeSessionDetail, params);
+        markStreamingItem(params.itemId || "", true);
+        noteFirstStreamDelta(params.itemId || "");
+        state.pendingStreamingItemIds.add(params.itemId || "");
+        scheduleStreamingFlush();
         return true;
       }
       if (method === "item/started" || method === "item/completed") {
@@ -2787,8 +2985,22 @@ INDEX_HTML = """<!doctype html>
         if (!message) {
           return false;
         }
-        const nextDetail = upsertLiveMessage(cloneJson(state.activeSessionDetail), message);
-        renderActiveSessionFromLiveUpdate(nextDetail);
+        upsertLiveMessageInPlace(state.activeSessionDetail, message);
+        if (method === "item/started") {
+          markStreamingItem(message.itemId || "", true);
+        } else {
+          if (message.role === "assistant" && message.phase === "final_answer") {
+            noteCompletionReceived(message.itemId || "");
+          }
+          markStreamingItem(message.itemId || "", false);
+          state.pendingStreamingItemIds.delete(message.itemId || "");
+        }
+        renderActiveSessionFromLiveUpdate(state.activeSessionDetail);
+        if (method === "item/completed" && message.role === "assistant" && message.phase === "final_answer") {
+          requestAnimationFrame(() => {
+            noteCompletionPaint(message.itemId || "");
+          });
+        }
         return true;
       }
       return false;
@@ -3064,7 +3276,7 @@ INDEX_HTML = """<!doctype html>
               <summary class="commentary-summary">
                 <strong>Commentary</strong>
               </summary>
-              <div class="commentary-body markdown">${renderMarkdown(message.text || "")}</div>
+              <div class="commentary-body markdown" data-message-item-id="${escapeHtml(message.itemId || "")}">${renderMessageBodyHtml(message)}</div>
             </details>
           ` : `
             <div class="bubble-header">
@@ -3072,7 +3284,7 @@ INDEX_HTML = """<!doctype html>
               ${!phaseLabel(message) ? "" : `<span class="phase-chip">${escapeHtml(phaseLabel(message))}</span>`}
               <span>${escapeHtml(message.timestamp || "")}</span>
             </div>
-            <div class="markdown">${renderMarkdown(message.text || "")}</div>
+            <div class="markdown" data-message-item-id="${escapeHtml(message.itemId || "")}">${renderMessageBodyHtml(message)}</div>
             ${isLastRenderableFinalAssistantMessageForTurn(message, visibleMessages, index) && turnFileChanges.has(message.turnId || "") ? renderFileChangeCard(turnFileChanges.get(message.turnId || "")) : ""}
           `}
         </article>
@@ -3149,6 +3361,7 @@ INDEX_HTML = """<!doctype html>
 
     function renderDraftSession() {
       const draft = state.draftSession;
+      resetStreamingState();
       state.activeSessionDetail = null;
       state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
@@ -3177,6 +3390,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderLoadingSession() {
+      resetStreamingState();
       state.activeSessionDetail = null;
       state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
@@ -3282,6 +3496,7 @@ INDEX_HTML = """<!doctype html>
       const requestNonce = ++state.activeSessionRequestNonce;
       state.draftSession = null;
       state.activeSessionId = sessionId;
+      resetStreamingState();
       persistActiveSessionPreference(sessionId);
       updateSessionUrl(sessionId);
       state.activeSessionDetail = null;
@@ -3655,6 +3870,31 @@ INDEX_HTML = """<!doctype html>
       window.visualViewport.addEventListener("resize", syncViewportHeight);
       window.visualViewport.addEventListener("scroll", syncViewportHeight);
     }
+
+    window.__redexMetrics = {
+      clear() {
+        state.liveMetricEvents = [];
+        state.firstStreamDeltaAt = {};
+        state.firstStreamPaintLatencyMs = {};
+        state.completionReceivedAt = {};
+        state.completionPaintLatencyMs = {};
+      },
+      snapshot() {
+        return {
+          events: state.liveMetricEvents.map((entry) => ({ ...entry })),
+          firstStreamPaintLatencyMs: { ...state.firstStreamPaintLatencyMs },
+          completionPaintLatencyMs: { ...state.completionPaintLatencyMs },
+        };
+      },
+      latestFirstStreamPaintLatency() {
+        const values = Object.values(state.firstStreamPaintLatencyMs);
+        return values.length ? values[values.length - 1] : null;
+      },
+      latestCompletionPaintLatency() {
+        const values = Object.values(state.completionPaintLatencyMs);
+        return values.length ? values[values.length - 1] : null;
+      },
+    };
 
     syncViewportHeight();
     updateConnectionBadge();

@@ -85,6 +85,49 @@ test("background updates do not steal focus and mark the thread unseen", async (
 });
 
 
+test("active thread shows streamed text before the final answer lands", async ({ page, redexUrl, controlUrl }) => {
+  await openRedex(page, redexUrl);
+  await page.locator('[data-session-id="thread-1"]').click();
+  await expect(page.locator("#sessionTitle")).toHaveText("Primary thread");
+  await page.evaluate(() => window.__redexMetrics?.clear?.());
+
+  await postControl(controlUrl, "/stream", {
+    threadId: "thread-1",
+    promptText: "stream this",
+    deltas: ["Streaming ", "preview"],
+    finalText: "Stream finished cleanly.",
+    phase: "final_answer",
+    delaySeconds: 0.12,
+  });
+
+  await page.waitForFunction(
+    () => window.__redexMetrics?.latestFirstStreamPaintLatency?.() != null,
+    null,
+    { timeout: 5000, polling: 20 },
+  );
+  await expect(page.locator("#conversation")).toContainText("stream this");
+  await expect(page.locator("#conversation")).toContainText("Stream finished cleanly.");
+  const metrics = await page.evaluate(() => ({
+    first: window.__redexMetrics?.latestFirstStreamPaintLatency?.(),
+    completion: window.__redexMetrics?.latestCompletionPaintLatency?.(),
+  }));
+  expect(metrics.first).not.toBeNull();
+  expect(metrics.completion).not.toBeNull();
+  const tail = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("#conversation article"))
+      .slice(-2)
+      .map((node) => ({
+        cls: node.className,
+        text: node.innerText,
+      })),
+  );
+  expect(tail[0]?.cls).toContain("user");
+  expect(tail[0]?.text).toContain("stream this");
+  expect(tail[1]?.cls).toContain("assistant");
+  expect(tail[1]?.text).toContain("Stream finished cleanly.");
+});
+
+
 test("scrolling up keeps position stable and shows the jump-to-end control", async ({ page, redexUrl, controlUrl }) => {
   await openRedex(page, redexUrl);
   await page.locator('[data-session-id="thread-1"]').click();

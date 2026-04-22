@@ -64,18 +64,67 @@ async function main() {
       }),
     );
 
+    results.push(
+      await measure("first_stream_chunk", async () => {
+        await page.locator('[data-session-id="thread-1"]').click();
+        await expect(page.locator("#sessionTitle")).toHaveText("Primary thread");
+        await page.evaluate(() => window.__redexMetrics?.clear?.());
+        await postJson(controlUrl, "/stream", {
+          threadId: "thread-1",
+          promptText: "stream perf",
+          deltas: ["Streaming ", "preview"],
+          finalText: "Stream finished cleanly.",
+          phase: "final_answer",
+          delaySeconds: 0.18,
+        });
+        await page.waitForFunction(
+          () => document.getElementById("conversation")?.innerText.includes("Streaming"),
+          null,
+          { timeout: 5000, polling: 20 },
+        );
+      }),
+    );
+
+    results.push(
+      await measure("stream_completion", async () => {
+        await expect(page.locator("#conversation")).toContainText("Stream finished cleanly.");
+      }),
+    );
+
     const budgets = {
       initial_open: 1500,
       switch_to_background: 800,
       switch_back_cached: 400,
       background_unseen_marker: 1500,
+      first_stream_chunk: 700,
+      stream_completion: 900,
     };
+
+    const browserMetrics = await page.evaluate(() => ({
+      firstStreamPaintLatencyMs: window.__redexMetrics?.latestFirstStreamPaintLatency?.(),
+      completionPaintLatencyMs: window.__redexMetrics?.latestCompletionPaintLatency?.(),
+    }));
 
     for (const result of results) {
       const budget = budgets[result.name];
       const withinBudget = result.ms <= budget;
       console.log(
         `${result.name.padEnd(24)} ${result.ms.toFixed(1).padStart(7)}ms  budget=${budget}ms  ${withinBudget ? "OK" : "SLOW"}`,
+      );
+      if (!withinBudget) {
+        process.exitCode = 1;
+      }
+    }
+
+    const browserLatencyBudgets = {
+      firstStreamPaintLatencyMs: 50,
+      completionPaintLatencyMs: 50,
+    };
+    for (const [name, budget] of Object.entries(browserLatencyBudgets)) {
+      const value = browserMetrics[name];
+      const withinBudget = typeof value === "number" && value <= budget;
+      console.log(
+        `${name.padEnd(24)} ${String(typeof value === "number" ? value.toFixed(1) : value).padStart(7)}ms  budget=${budget}ms  ${withinBudget ? "OK" : "SLOW"}`,
       );
       if (!withinBudget) {
         process.exitCode = 1;
