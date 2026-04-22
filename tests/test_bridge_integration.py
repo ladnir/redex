@@ -157,6 +157,29 @@ class BridgeIntegrationTests(unittest.TestCase):
                 self.assertEqual(len(third["sessions"]), 1)
                 self.assertGreaterEqual(upstream.method_counts["thread/list"], 2)
 
+    def test_server_metrics_endpoint_and_summary(self) -> None:
+        with FakeCodexAppServer(build_sample_scenario()) as upstream:
+            with running_bridge(app_server_url=upstream.url) as (server, _thread):
+                host, port = server.server_address
+                base_url = f"http://{host}:{port}"
+
+                sessions = json_request(f"{base_url}/api/sessions?limit=10")
+                self.assertEqual(len(sessions["sessions"]), 1)
+
+                detail = json_request(f"{base_url}/api/sessions/thread-1?limit=20")
+                self.assertEqual(detail["session"]["id"], "thread-1")
+
+                metrics = json_request(f"{base_url}/api/server-metrics?limit=20")
+                kinds = [entry["kind"] for entry in metrics["metrics"]]
+                self.assertIn("session-list", kinds)
+                self.assertIn("session-detail", kinds)
+
+                summary = json_request(f"{base_url}/api/metrics/summary?limit=20")
+                self.assertIn("server", summary)
+                self.assertIn("byKind", summary["server"])
+                self.assertIn("session-list", summary["server"]["byKind"])
+                self.assertIn("totalMs", summary["server"]["byKind"]["session-list"]["numeric"])
+
 
 if __name__ == "__main__":
     unittest.main()

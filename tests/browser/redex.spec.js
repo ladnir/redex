@@ -69,6 +69,60 @@ test("late session loads do not overwrite the newest thread selection", async ({
 });
 
 
+test("switching sessions shows a loading state instead of the previous transcript", async ({ page, redexUrl, controlUrl }) => {
+  await openRedex(page, redexUrl);
+  await expect(page.locator("#sessionTitle")).toHaveText("Primary thread");
+  await expect(page.locator("#conversation")).toContainText("Answer 69");
+
+  await postControl(controlUrl, "/delay", { method: "thread/read", threadId: "thread-2", seconds: 0.5 });
+  await postControl(controlUrl, "/delay", { method: "thread/turns/list", threadId: "thread-2", seconds: 0.5 });
+
+  await page.locator('[data-session-id="thread-2"]').click();
+
+  await expect(page.locator("#sessionTitle")).toHaveText("Background thread");
+  await expect(page.locator("#conversation")).toContainText("Loading transcript...");
+  await expect(page.locator("#conversation")).toContainText("Fetching the latest turn history for this session.");
+  await expect(page.locator("#conversation")).not.toContainText("Answer 69");
+  await expect(page.locator("#promptInput")).toBeDisabled();
+
+  await expect(page.locator("#conversation")).toContainText("background ready");
+});
+
+
+test("client timing metrics are reported back to Redex", async ({ page, redexUrl, controlUrl }) => {
+  await openRedex(page, redexUrl);
+  await postControl(controlUrl, "/delay", { method: "thread/read", threadId: "thread-2", seconds: 0.35 });
+  await postControl(controlUrl, "/delay", { method: "thread/turns/list", threadId: "thread-2", seconds: 0.35 });
+
+  await page.locator('[data-session-id="thread-2"]').click();
+  await expect(page.locator("#conversation")).toContainText("background ready");
+  await page.evaluate(() => window.__redexMetrics?.flushUploads?.());
+
+  await expect.poll(async () => {
+    const response = await fetch(`${redexUrl}/api/client-metrics?limit=30`);
+    const payload = await response.json();
+    return (payload.metrics || []).map((entry) => entry.kind);
+  }).toEqual(expect.arrayContaining([
+    "session-switch-start",
+    "session-switch-loading-painted",
+    "session-detail-response",
+    "session-switch-complete",
+  ]));
+
+  await expect.poll(async () => {
+    const response = await fetch(`${redexUrl}/api/metrics/summary?limit=50`);
+    const payload = await response.json();
+    return payload?.client?.byKind?.["session-switch-complete"]?.numeric?.totalMs?.count || 0;
+  }).toBeGreaterThan(0);
+
+  await expect.poll(async () => {
+    const response = await fetch(`${redexUrl}/api/metrics/summary?limit=50`);
+    const payload = await response.json();
+    return payload?.server?.byKind?.["session-detail"]?.numeric?.totalMs?.count || 0;
+  }).toBeGreaterThan(0);
+});
+
+
 test("background updates do not steal focus and mark the thread unseen", async ({ page, redexUrl, controlUrl }) => {
   await openRedex(page, redexUrl);
 
@@ -113,18 +167,37 @@ test("active thread shows streamed text before the final answer lands", async ({
   }));
   expect(metrics.first).not.toBeNull();
   expect(metrics.completion).not.toBeNull();
-  const tail = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("#conversation article"))
-      .slice(-2)
-      .map((node) => ({
-        cls: node.className,
-        text: node.innerText,
-      })),
-  );
-  expect(tail[0]?.cls).toContain("user");
-  expect(tail[0]?.text).toContain("stream this");
-  expect(tail[1]?.cls).toContain("assistant");
-  expect(tail[1]?.text).toContain("Stream finished cleanly.");
+  const userTurns = page.locator("#conversation article.user");
+  await expect(userTurns.filter({ hasText: "stream this" })).toHaveCount(1);
+
+  const assistantTail = await page.evaluate(() => {
+    const articles = Array.from(document.querySelectorAll("#conversation article"));
+    const assistant = [...articles].reverse().find((node) => node.className.includes("assistant"));
+    return assistant ? { cls: assistant.className, text: assistant.innerText } : null;
+  });
+  expect(assistantTail?.cls).toContain("assistant");
+  expect(assistantTail?.text).toContain("Stream finished cleanly.");
+});
+
+
+test("sending a prompt echoes it immediately with a pending state", async ({ page, redexUrl, controlUrl }) => {
+  await openRedex(page, redexUrl);
+  await page.locator('[data-session-id="thread-1"]').click();
+  await expect(page.locator("#sessionTitle")).toHaveText("Primary thread");
+
+  await postControl(controlUrl, "/delay", { method: "turn/start", threadId: "thread-1", seconds: 0.45 });
+
+  await page.locator("#promptInput").fill("optimistic hello");
+  await page.locator("#sendButton").click();
+
+  const pendingBubble = page.locator("#conversation article.user.pending").last();
+  await expect(pendingBubble).toContainText("optimistic hello");
+  await expect(pendingBubble).toContainText("sending...");
+  await expect(page.locator("#promptInput")).toHaveValue("");
+  await expect(page.locator("#sessionTitle")).toHaveText("Primary thread");
+
+  await expect(page.locator("#conversation")).toContainText("Active thread final answer.");
+  await expect(page.locator("#conversation article.user.pending")).toHaveCount(0);
 });
 
 

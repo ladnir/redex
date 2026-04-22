@@ -33,6 +33,7 @@ from .app_server import normalize_thread
 
 
 EVENT_BACKLOG_LIMIT = 500
+CLIENT_METRIC_BACKLOG_LIMIT = 2000
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 DEFAULT_TURN_PAGE_LIMIT = 40
 MAX_TURN_PAGE_LIMIT = 100
@@ -823,6 +824,12 @@ INDEX_HTML = """<!doctype html>
       background: var(--user);
       margin-left: auto;
     }
+    .bubble.pending {
+      opacity: 0.9;
+    }
+    .bubble.user.pending {
+      box-shadow: inset 0 0 0 1px rgba(207, 226, 245, 0.14);
+    }
     .bubble.assistant {
       background: transparent;
       margin-right: auto;
@@ -925,6 +932,12 @@ INDEX_HTML = """<!doctype html>
       font-size: 0.72rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+    }
+    .pending-chip {
+      background: rgba(121, 149, 180, 0.56);
+      color: #eef6ff;
+      text-transform: lowercase;
+      letter-spacing: 0;
     }
     .bubble.commentary .phase-chip {
       background: rgba(49, 74, 102, 0.8);
@@ -1323,6 +1336,57 @@ INDEX_HTML = """<!doctype html>
       background: rgba(45, 68, 94, 0.72);
       border: 1px dashed var(--line);
     }
+    .loading-state {
+      display: grid;
+      gap: 0.8rem;
+      padding: 1rem 1.05rem;
+      border-radius: 1rem;
+      background: rgba(25, 39, 56, 0.8);
+      border: 1px solid rgba(170, 205, 238, 0.12);
+      box-shadow: inset 0 1px 0 rgba(233, 243, 255, 0.04);
+    }
+    .loading-state-header {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      color: #f8fbff;
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+    .loading-state-copy {
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.4;
+    }
+    .loading-skeleton {
+      display: grid;
+      gap: 0.45rem;
+    }
+    .loading-skeleton-line {
+      display: block;
+      height: 0.72rem;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(69, 92, 118, 0.38), rgba(115, 146, 180, 0.2), rgba(69, 92, 118, 0.38));
+      background-size: 200% 100%;
+      animation: redex-loading-shimmer 1.15s linear infinite;
+    }
+    .loading-skeleton-line.short {
+      width: 42%;
+    }
+    .loading-skeleton-line.medium {
+      width: 66%;
+    }
+    .loading-skeleton-line.long {
+      width: 88%;
+    }
+    @keyframes redex-loading-shimmer {
+      0% {
+        background-position: 200% 0;
+      }
+      100% {
+        background-position: -200% 0;
+      }
+    }
     @media (min-width: 860px) {
       html, body {
         height: 100%;
@@ -1534,7 +1598,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <div class="hero-actions">
           <details id="notificationsMenu" class="notify-menu">
-            <summary id="notificationsButton" class="secondary install-button notification-button notify-summary">Notify...</summary>
+            <summary id="notificationsButton" class="secondary install-button notification-button notify-summary" aria-label="Notifications" title="Notifications">&#128276;</summary>
             <div class="notify-popover">
               <div id="notificationsTitle" class="notify-title">Final reply notifications</div>
               <div id="notificationsCopy" class="notify-copy">Only final responses notify.</div>
@@ -1542,7 +1606,6 @@ INDEX_HTML = """<!doctype html>
             </div>
           </details>
           <button id="installButton" class="secondary install-button" type="button" hidden>Install</button>
-          <span id="sessionCount" class="mini-pill">0 sessions</span>
         </div>
       </div>
     </section>
@@ -1610,6 +1673,8 @@ INDEX_HTML = """<!doctype html>
       sessionListRequestNonce: 0,
       activeSessionDetail: null,
       sessionDetailCache: {},
+      optimisticMessagesBySession: {},
+      nextOptimisticMessageId: 0,
       loadingOlderHistory: false,
       recentTurnsLimit: 40,
       defaultCwd: "__DEFAULT_CWD__",
@@ -1632,6 +1697,8 @@ INDEX_HTML = """<!doctype html>
       firstStreamPaintLatencyMs: {},
       completionReceivedAt: {},
       completionPaintLatencyMs: {},
+      pendingClientMetrics: [],
+      clientMetricFlushHandle: 0,
       deferredInstallPrompt: null,
       notificationsSupported: false,
       notificationsEnabled: false,
@@ -1651,7 +1718,6 @@ INDEX_HTML = """<!doctype html>
     const reloadSessionButton = document.getElementById("reloadSessionButton");
     const scrollToEndButton = document.getElementById("scrollToEndButton");
     const connectionBadge = document.getElementById("connectionBadge");
-    const sessionCount = document.getElementById("sessionCount");
     const searchInput = document.getElementById("searchInput");
     const installButton = document.getElementById("installButton");
     const notificationsMenu = document.getElementById("notificationsMenu");
@@ -1779,6 +1845,196 @@ INDEX_HTML = """<!doctype html>
       return null;
     }
 
+    function normalizedMessageText(value) {
+      return String(value ?? "").replaceAll("\\r\\n", "\\n").trim();
+    }
+
+    function persistedUserMessages(messages) {
+      return (messages || []).filter((message) => (
+        message &&
+        !message.optimistic &&
+        message.role === "user" &&
+        message.type !== "fileChange"
+      ));
+    }
+
+    function optimisticMessagesForSession(sessionId) {
+      if (!sessionId) {
+        return [];
+      }
+      return state.optimisticMessagesBySession[sessionId] || [];
+    }
+
+    function hasOptimisticMessagesForSession(sessionId) {
+      return optimisticMessagesForSession(sessionId).length > 0;
+    }
+
+    function makeOptimisticUserMessage(text, expectedUserIndex) {
+      state.nextOptimisticMessageId += 1;
+      const optimisticId = `optimistic-${state.nextOptimisticMessageId}`;
+      return {
+        itemId: optimisticId,
+        turnId: optimisticId,
+        turnStatus: "pending",
+        timestamp: "",
+        role: "user",
+        phase: null,
+        text,
+        optimistic: true,
+        pendingState: "sending",
+        expectedUserIndex,
+        optimisticSequence: state.nextOptimisticMessageId,
+      };
+    }
+
+    function sessionSummaryById(sessionId) {
+      if (!sessionId) {
+        return null;
+      }
+      return state.sessions.find((session) => session.id === sessionId) || null;
+    }
+
+    function addOptimisticMessageForSession(sessionId, text) {
+      if (!sessionId) {
+        return null;
+      }
+      const cachedDetail = state.activeSessionId === sessionId
+        ? state.activeSessionDetail
+        : cachedSessionDetail(sessionId);
+      const expectedUserIndex = persistedUserMessages(cachedDetail?.messages || []).length + optimisticMessagesForSession(sessionId).length;
+      const message = makeOptimisticUserMessage(text, expectedUserIndex);
+      state.optimisticMessagesBySession[sessionId] = [...optimisticMessagesForSession(sessionId), message];
+      return message;
+    }
+
+    function removeOptimisticMessageById(sessionId, itemId) {
+      if (!sessionId || !itemId) {
+        return;
+      }
+      const remaining = optimisticMessagesForSession(sessionId).filter((message) => message.itemId !== itemId);
+      if (remaining.length) {
+        state.optimisticMessagesBySession[sessionId] = remaining;
+      } else {
+        delete state.optimisticMessagesBySession[sessionId];
+      }
+    }
+
+    function reconcileOptimisticMessages(sessionId, actualMessages) {
+      if (!sessionId) {
+        return;
+      }
+      const optimistic = optimisticMessagesForSession(sessionId);
+      if (!optimistic.length) {
+        return;
+      }
+      const actualUsers = persistedUserMessages(actualMessages);
+      if (!actualUsers.length) {
+        return;
+      }
+      const kept = [];
+      const usedActualIndexes = new Set();
+      const searchWindow = Math.max(8, optimistic.length * 3);
+      const searchStart = Math.max(0, actualUsers.length - searchWindow);
+      for (let optimisticIndex = optimistic.length - 1; optimisticIndex >= 0; optimisticIndex -= 1) {
+        const optimisticMessage = optimistic[optimisticIndex];
+        const targetText = normalizedMessageText(optimisticMessage.text);
+        let matchedIndex = -1;
+        for (let index = actualUsers.length - 1; index >= searchStart; index -= 1) {
+          if (usedActualIndexes.has(index)) {
+            continue;
+          }
+          if (normalizedMessageText(actualUsers[index]?.text) === targetText) {
+            matchedIndex = index;
+            break;
+          }
+        }
+        if (matchedIndex >= 0) {
+          usedActualIndexes.add(matchedIndex);
+          continue;
+        }
+        kept.unshift(optimisticMessage);
+      }
+      if (kept.length) {
+        state.optimisticMessagesBySession[sessionId] = kept;
+      } else {
+        delete state.optimisticMessagesBySession[sessionId];
+      }
+    }
+
+    function transferDraftOptimisticMessages(sessionId, draftSession) {
+      if (!sessionId || !draftSession?.pendingMessages?.length) {
+        return;
+      }
+      state.optimisticMessagesBySession[sessionId] = [
+        ...optimisticMessagesForSession(sessionId),
+        ...draftSession.pendingMessages,
+      ];
+    }
+
+    function addDraftOptimisticMessage(text) {
+      if (!state.draftSession) {
+        return null;
+      }
+      const pendingMessages = state.draftSession.pendingMessages || [];
+      const message = makeOptimisticUserMessage(text, pendingMessages.length);
+      state.draftSession.pendingMessages = [...pendingMessages, message];
+      return message;
+    }
+
+    function removeDraftOptimisticMessage(itemId) {
+      if (!state.draftSession || !itemId) {
+        return;
+      }
+      const remaining = (state.draftSession.pendingMessages || []).filter((message) => message.itemId !== itemId);
+      state.draftSession.pendingMessages = remaining;
+    }
+
+    function sessionDetailWithOptimisticMessages(detail) {
+      const sessionId = detail?.session?.id || null;
+      if (!sessionId) {
+        return detail;
+      }
+      const optimisticMessages = optimisticMessagesForSession(sessionId);
+      if (!optimisticMessages.length) {
+        return detail;
+      }
+      return {
+        ...detail,
+        messages: [...(detail.messages || []), ...optimisticMessages],
+      };
+    }
+
+    function syntheticSessionDetail(sessionId) {
+      const session = sessionSummaryById(sessionId) || cachedSessionDetail(sessionId)?.session || {
+        id: sessionId,
+        title: "Session",
+        status: "active",
+        cwd: "",
+        updatedAt: "",
+      };
+      return {
+        session,
+        messages: [],
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    }
+
+    function draftDetail(draft) {
+      return {
+        session: {
+          id: "__draft__",
+          title: "New chat",
+          status: "draft",
+          cwd: draft?.cwd || "",
+          updatedAt: "",
+        },
+        messages: draft?.pendingMessages || [],
+        nextCursor: null,
+        backwardsCursor: null,
+      };
+    }
+
     function visibleSessions() {
       const query = (state.searchQuery || "").trim().toLowerCase();
       if (!query) {
@@ -1866,10 +2122,11 @@ INDEX_HTML = """<!doctype html>
       if (!state.draftSession || state.draftSession.groupKey !== groupKey) {
         return null;
       }
+      const latestPendingMessage = [...(state.draftSession.pendingMessages || [])].pop();
       return {
         id: "__draft__",
         title: "New chat",
-        preview: "Send the first prompt to create this chat.",
+        preview: latestPendingMessage?.text || "Send the first prompt to create this chat.",
         isDraft: true,
       };
     }
@@ -1883,10 +2140,13 @@ INDEX_HTML = """<!doctype html>
     }
 
     function sessionListRenderKey(groups) {
+      const latestDraftPendingMessage = [...(state.draftSession?.pendingMessages || [])].pop();
       return JSON.stringify({
         search: state.searchQuery || "",
         activeSessionId: state.activeSessionId || "",
         draftGroup: state.draftSession?.groupKey || "",
+        draftPreview: latestDraftPendingMessage?.text || "",
+        draftPendingCount: state.draftSession?.pendingMessages?.length || 0,
         collapsedGroups: Object.keys(state.collapsedGroups).sort(),
         expandedGroups: Object.keys(state.expandedGroups).sort(),
         unseenSessionIds: Object.keys(state.unseenSessionIds).sort(),
@@ -2317,11 +2577,6 @@ INDEX_HTML = """<!doctype html>
       connectionBadge.textContent = state.eventSourceHealthy ? "Live" : "Polling";
     }
 
-    function updateSessionCount() {
-      const count = visibleSessions().length;
-      sessionCount.textContent = `${count} session${count === 1 ? "" : "s"}`;
-    }
-
     function isMobileViewport() {
       return window.matchMedia("(max-width: 859px)").matches;
     }
@@ -2373,17 +2628,23 @@ INDEX_HTML = """<!doctype html>
       );
     }
 
+    function setNotificationsButtonStateLabel(label) {
+      notificationsButton.textContent = "🔔";
+      notificationsButton.title = label;
+      notificationsButton.setAttribute("aria-label", label);
+    }
+
     function updateNotificationsButton() {
+      notificationsButton.classList.remove("is-enabled", "is-blocked");
       if (!pushNotificationsSupported()) {
         state.notificationsSupported = false;
-        notificationsButton.classList.remove("is-enabled");
         notificationsButton.classList.add("is-blocked");
         if (window.isSecureContext) {
-          notificationsButton.textContent = "Notify unavailable";
+          setNotificationsButtonStateLabel("Notifications unavailable");
           notificationsTitle.textContent = "Notifications unavailable";
           notificationsCopy.textContent = "This browser can open Redex, but Push/Service Worker notifications are not available here.";
         } else {
-          notificationsButton.textContent = "Notify needs HTTPS";
+          setNotificationsButtonStateLabel("Notifications need HTTPS");
           notificationsTitle.textContent = "Notifications need HTTPS";
           notificationsCopy.textContent = "Phone push needs a secure origin. Your current Redex URL is plain HTTP, so the browser will not allow push registration.";
         }
@@ -2399,7 +2660,7 @@ INDEX_HTML = """<!doctype html>
         state.notificationsPermission === "denied" && !state.notificationsEnabled,
       );
       if (state.notificationsBusy) {
-        notificationsButton.textContent = "Working...";
+        setNotificationsButtonStateLabel("Notifications updating");
         notificationsTitle.textContent = "Final reply notifications";
         notificationsCopy.textContent = "Only final responses notify. Updating notification registration now.";
         notificationsActionButton.disabled = true;
@@ -2407,7 +2668,7 @@ INDEX_HTML = """<!doctype html>
         return;
       }
       if (state.notificationsError) {
-        notificationsButton.textContent = "Notify error";
+        setNotificationsButtonStateLabel("Notifications error");
         notificationsTitle.textContent = "Notifications hit an error";
         notificationsCopy.textContent = state.notificationsError;
         notificationsActionButton.disabled = false;
@@ -2415,14 +2676,14 @@ INDEX_HTML = """<!doctype html>
         return;
       }
       if (state.notificationsPermission === "denied") {
-        notificationsButton.textContent = "Notify blocked";
+        setNotificationsButtonStateLabel("Notifications blocked");
         notificationsTitle.textContent = "Notifications blocked";
         notificationsCopy.textContent = "Browser notifications are blocked for this origin. Re-enable them in browser site settings, then try again.";
         notificationsActionButton.disabled = true;
         notificationsActionButton.textContent = "Blocked";
         return;
       }
-      notificationsButton.textContent = state.notificationsEnabled ? "Notify on" : "Notify off";
+      setNotificationsButtonStateLabel(state.notificationsEnabled ? "Notifications on" : "Notifications off");
       notificationsTitle.textContent = "Final reply notifications";
       notificationsCopy.textContent = state.notificationsEnabled
         ? "Only final responses notify. Tap below to turn notifications off on this device."
@@ -2731,6 +2992,63 @@ INDEX_HTML = """<!doctype html>
       if (state.liveMetricEvents.length > 200) {
         state.liveMetricEvents.splice(0, state.liveMetricEvents.length - 200);
       }
+      return entry;
+    }
+
+    function roundedMs(value) {
+      return Math.round(Number(value || 0) * 10) / 10;
+    }
+
+    function queueClientMetric(entry) {
+      state.pendingClientMetrics.push(entry);
+      if (state.pendingClientMetrics.length > 200) {
+        state.pendingClientMetrics.splice(0, state.pendingClientMetrics.length - 200);
+      }
+      if (state.clientMetricFlushHandle) {
+        return;
+      }
+      state.clientMetricFlushHandle = window.setTimeout(() => {
+        state.clientMetricFlushHandle = 0;
+        flushClientMetrics().catch(() => {});
+      }, 250);
+    }
+
+    async function flushClientMetrics(useBeacon = false) {
+      if (!state.pendingClientMetrics.length) {
+        return;
+      }
+      const entries = state.pendingClientMetrics.splice(0, state.pendingClientMetrics.length);
+      const payload = JSON.stringify({ entries });
+      if (useBeacon && navigator.sendBeacon) {
+        const sent = navigator.sendBeacon(
+          "/api/client-metrics",
+          new Blob([payload], { type: "application/json" }),
+        );
+        if (sent) {
+          return;
+        }
+      }
+      try {
+        const response = await fetch("/api/client-metrics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+          keepalive: true,
+        });
+        if (!response.ok) {
+          throw new Error(`Metrics upload failed: ${response.status}`);
+        }
+      } catch {
+        state.pendingClientMetrics.unshift(...entries);
+        if (state.pendingClientMetrics.length > 200) {
+          state.pendingClientMetrics.splice(200);
+        }
+      }
+    }
+
+    function reportClientMetric(kind, data = {}) {
+      const entry = recordLiveMetric(kind, data);
+      queueClientMetric(entry);
       return entry;
     }
 
@@ -3103,7 +3421,6 @@ INDEX_HTML = """<!doctype html>
 
     function renderSessions() {
       const groups = groupedSessions();
-      updateSessionCount();
       const nextSessionListKey = sessionListRenderKey(groups);
       if (state.lastRenderedSessionListKey === nextSessionListKey) {
         return;
@@ -3212,7 +3529,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderConversation(detail, forceStick = false) {
-      const messages = coalescedMessages(detail.messages || []);
+      const messages = coalescedMessages(sessionDetailWithOptimisticMessages(detail).messages || []);
       const turnFileChanges = aggregateTurnFileChanges(messages);
       const visibleMessages = messages.filter((message) => message?.type !== "fileChange");
       const nextConversationKey = `${conversationKey(messages)}|older:${detail.nextCursor || ""}|loading:${state.loadingOlderHistory ? "1" : "0"}`;
@@ -3270,7 +3587,7 @@ INDEX_HTML = """<!doctype html>
         `
         : "";
       conversation.innerHTML = `${loadOlderMarkup}${visibleMessages.map((message, index) => `
-        <article class="bubble ${message.role} ${message.phase === "commentary" ? "commentary" : ""}">
+        <article class="bubble ${message.role} ${message.phase === "commentary" ? "commentary" : ""} ${message.optimistic ? "pending" : ""}">
           ${message.phase === "commentary" ? `
             <details class="commentary-details"${index === trailingCommentaryIndex ? " open" : ""}>
               <summary class="commentary-summary">
@@ -3281,8 +3598,8 @@ INDEX_HTML = """<!doctype html>
           ` : `
             <div class="bubble-header">
               <strong>${escapeHtml(message.role === "assistant" ? "Codex" : "You")}</strong>
-              ${!phaseLabel(message) ? "" : `<span class="phase-chip">${escapeHtml(phaseLabel(message))}</span>`}
-              <span>${escapeHtml(message.timestamp || "")}</span>
+              ${message.optimistic ? '<span class="phase-chip pending-chip">sending...</span>' : (!phaseLabel(message) ? "" : `<span class="phase-chip">${escapeHtml(phaseLabel(message))}</span>`)}
+              ${message.optimistic ? "" : `<span>${escapeHtml(message.timestamp || "")}</span>`}
             </div>
             <div class="markdown" data-message-item-id="${escapeHtml(message.itemId || "")}">${renderMessageBodyHtml(message)}</div>
             ${isLastRenderableFinalAssistantMessageForTurn(message, visibleMessages, index) && turnFileChanges.has(message.turnId || "") ? renderFileChangeCard(turnFileChanges.get(message.turnId || "")) : ""}
@@ -3316,6 +3633,7 @@ INDEX_HTML = """<!doctype html>
 
     function renderSessionDetail(detail, forceStick = false) {
       const session = detail.session || {};
+      reconcileOptimisticMessages(session.id || "", detail.messages || []);
       cacheSessionDetail(detail);
       state.activeSessionDetail = detail;
       const nextMetaKey = sessionMetaKey(session);
@@ -3379,8 +3697,12 @@ INDEX_HTML = """<!doctype html>
           </div>
         </details>
       ` : "";
-      conversation.innerHTML = '<div class="empty empty-state">Send the first prompt to create this chat.</div>';
-      updateScrollToEndButton();
+      if (draft?.pendingMessages?.length) {
+        renderConversation(draftDetail(draft), true);
+      } else {
+        conversation.innerHTML = '<div class="empty empty-state">Send the first prompt to create this chat.</div>';
+        updateScrollToEndButton();
+      }
       promptInput.disabled = false;
       sendButton.disabled = false;
       reloadSessionButton.disabled = true;
@@ -3389,16 +3711,34 @@ INDEX_HTML = """<!doctype html>
       });
     }
 
-    function renderLoadingSession() {
+    function renderLoadingSession(sessionId = null) {
+      const session = sessionSummaryById(sessionId) || cachedSessionDetail(sessionId)?.session || null;
       resetStreamingState();
       state.activeSessionDetail = null;
       state.loadingOlderHistory = false;
       state.lastRenderedSessionId = null;
       state.lastRenderedMetaKey = null;
       state.lastRenderedConversationKey = null;
-      sessionTitle.textContent = "Loading session...";
-      sessionMetaInline.innerHTML = "";
-      conversation.innerHTML = '<div class="empty empty-state">Loading transcript...</div>';
+      sessionTitle.textContent = session?.title || "Loading session...";
+      sessionMetaInline.innerHTML = '<div class="meta empty">Syncing transcript...</div>';
+      conversation.innerHTML = `
+        <div class="loading-state" aria-live="polite">
+          <div class="loading-state-header">
+            <span class="thinking-dots" aria-hidden="true">
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+            </span>
+            <span>Loading transcript...</span>
+          </div>
+          <div class="loading-state-copy">Fetching the latest turn history for this session.</div>
+          <div class="loading-skeleton" aria-hidden="true">
+            <span class="loading-skeleton-line long"></span>
+            <span class="loading-skeleton-line medium"></span>
+            <span class="loading-skeleton-line short"></span>
+          </div>
+        </div>
+      `;
       updateScrollToEndButton();
       promptInput.disabled = true;
       sendButton.disabled = true;
@@ -3406,7 +3746,26 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function fetchJson(url, init) {
+      const startedAt = performance.now();
+      const method = String(init?.method || "GET").toUpperCase();
       const response = await fetch(url, init);
+      const requestUrl = new URL(url, window.location.origin);
+      const isMetricsUpload = requestUrl.pathname === "/api/client-metrics";
+      const serverTiming = response.headers.get("Server-Timing") || "";
+      const serverTimingMatch = /dur=([0-9.]+)/.exec(serverTiming);
+      const serverMs = serverTimingMatch ? Number(serverTimingMatch[1]) : null;
+      const cacheStatus = response.headers.get("X-Redex-Cache") || "";
+      if (!isMetricsUpload) {
+        reportClientMetric("http-fetch", {
+          url: `${requestUrl.pathname}${requestUrl.search}`,
+          method,
+          statusCode: response.status,
+          clientMs: roundedMs(performance.now() - startedAt),
+          serverMs: serverMs == null ? null : roundedMs(serverMs),
+          cacheStatus: cacheStatus || null,
+          ok: response.ok,
+        });
+      }
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(data.error || `Request failed: ${response.status}`);
@@ -3430,6 +3789,7 @@ INDEX_HTML = """<!doctype html>
 
     async function loadSessions() {
       const requestNonce = ++state.sessionListRequestNonce;
+      const startedAt = performance.now();
       const suffix = state.defaultCwd && state.defaultCwd !== "all workspaces"
         ? `?cwd=${encodeURIComponent(state.defaultCwd)}&limit=30`
         : "?limit=30";
@@ -3437,6 +3797,12 @@ INDEX_HTML = """<!doctype html>
       if (requestNonce !== state.sessionListRequestNonce) {
         return;
       }
+      reportClientMetric("session-list-response", {
+        requestNonce,
+        durationMs: roundedMs(performance.now() - startedAt),
+        sessionCount: Array.isArray(data.sessions) ? data.sessions.length : 0,
+        initialLoad: !state.initialSelectionDone,
+      });
       const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
       const selectedSessionId = state.activeSessionId;
@@ -3462,6 +3828,13 @@ INDEX_HTML = """<!doctype html>
       }
       state.initialSelectionDone = true;
       renderSessions();
+      requestAnimationFrame(() => {
+        reportClientMetric("session-list-painted", {
+          requestNonce,
+          sessionCount: state.sessions.length,
+          initialLoad: state.initialSelectionDone,
+        });
+      });
       if (state.draftSession) {
         renderDraftSession();
       } else if (state.activeSessionId && state.activeSessionId === selectedSessionId) {
@@ -3469,12 +3842,12 @@ INDEX_HTML = """<!doctype html>
       } else if (state.activeSessionId) {
         await loadSession(state.activeSessionId);
       }
-      updateSessionCount();
       ensurePolling();
     }
 
     async function refreshSessionListOnly() {
       const requestNonce = ++state.sessionListRequestNonce;
+      const startedAt = performance.now();
       const suffix = state.defaultCwd && state.defaultCwd !== "all workspaces"
         ? `?cwd=${encodeURIComponent(state.defaultCwd)}&limit=30`
         : "?limit=30";
@@ -3482,6 +3855,11 @@ INDEX_HTML = """<!doctype html>
       if (requestNonce !== state.sessionListRequestNonce) {
         return;
       }
+      reportClientMetric("session-list-refresh", {
+        requestNonce,
+        durationMs: roundedMs(performance.now() - startedAt),
+        sessionCount: Array.isArray(data.sessions) ? data.sessions.length : 0,
+      });
       const previousSessions = state.sessions;
       state.sessions = data.sessions || [];
       noteBackgroundSessionChanges(previousSessions, state.sessions);
@@ -3491,43 +3869,101 @@ INDEX_HTML = """<!doctype html>
       renderSessions();
     }
 
-    async function loadSession(sessionId) {
+    async function loadSession(sessionId, options = {}) {
       state.sessionListRequestNonce += 1;
       const requestNonce = ++state.activeSessionRequestNonce;
+      const previousSessionId = state.activeSessionId;
+      const isSessionSwitch = previousSessionId !== sessionId;
+      const preserveVisibleTranscript = options.preserveVisibleTranscript ?? !isSessionSwitch;
+      const startedAt = performance.now();
+      const currentVisibleDetail = (
+        preserveVisibleTranscript &&
+        state.activeSessionDetail &&
+        state.activeSessionDetail.session?.id === sessionId
+      ) ? state.activeSessionDetail : null;
+      const cachedDetail = cachedSessionDetail(sessionId);
+      const hadOptimisticMessages = hasOptimisticMessagesForSession(sessionId);
+      reportClientMetric(isSessionSwitch ? "session-switch-start" : "session-reload-start", {
+        requestNonce,
+        sessionId,
+        previousSessionId: previousSessionId || "",
+        preserveVisibleTranscript,
+        hadCachedDetail: !!cachedDetail,
+        hadVisibleTranscript: !!currentVisibleDetail,
+        hadOptimisticMessages,
+      });
       state.draftSession = null;
       state.activeSessionId = sessionId;
       resetStreamingState();
       persistActiveSessionPreference(sessionId);
       updateSessionUrl(sessionId);
-      state.activeSessionDetail = null;
       state.loadingOlderHistory = false;
-      state.lastRenderedSessionId = null;
-      state.lastRenderedMetaKey = null;
-      state.lastRenderedConversationKey = null;
+      if (!preserveVisibleTranscript || !currentVisibleDetail) {
+        state.activeSessionDetail = null;
+        state.lastRenderedSessionId = null;
+        state.lastRenderedMetaKey = null;
+        state.lastRenderedConversationKey = null;
+      }
       if (sessionId) {
         delete state.unseenSessionIds[sessionId];
       }
       ensureEventSource(sessionId);
       renderSessions();
-      const cachedDetail = cachedSessionDetail(sessionId);
-      if (cachedDetail) {
-        renderSessionDetail(cachedDetail, true);
-      } else {
-        renderLoadingSession();
+      if (!preserveVisibleTranscript || !currentVisibleDetail) {
+        renderLoadingSession(sessionId);
+        requestAnimationFrame(() => {
+          if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
+            return;
+          }
+          reportClientMetric(isSessionSwitch ? "session-switch-loading-painted" : "session-reload-loading-painted", {
+            requestNonce,
+            sessionId,
+            elapsedMs: roundedMs(performance.now() - startedAt),
+          });
+        });
       }
       try {
+        const fetchStartedAt = performance.now();
         const detail = await fetchJson(sessionDetailUrl(sessionId));
         if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
           return;
         }
+        const fetchMs = roundedMs(performance.now() - fetchStartedAt);
+        reportClientMetric("session-detail-response", {
+          requestNonce,
+          sessionId,
+          isSessionSwitch,
+          fetchMs,
+          messageCount: Array.isArray(detail.messages) ? detail.messages.length : 0,
+          hasOlderCursor: !!detail.nextCursor,
+        });
         renderSessionDetail(detail, true);
         promptInput.disabled = false;
         sendButton.disabled = false;
         reloadSessionButton.disabled = false;
+        requestAnimationFrame(() => {
+          if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
+            return;
+          }
+          reportClientMetric(isSessionSwitch ? "session-switch-complete" : "session-reload-complete", {
+            requestNonce,
+            sessionId,
+            totalMs: roundedMs(performance.now() - startedAt),
+            fetchMs,
+            messageCount: Array.isArray(detail.messages) ? detail.messages.length : 0,
+          });
+        });
       } catch (error) {
         if (state.activeSessionId !== sessionId || state.activeSessionRequestNonce !== requestNonce) {
           return;
         }
+        reportClientMetric("session-load-error", {
+          requestNonce,
+          sessionId,
+          isSessionSwitch,
+          totalMs: roundedMs(performance.now() - startedAt),
+          message: error?.message || String(error),
+        });
         conversation.innerHTML = "";
         sessionTitle.textContent = error.message || String(error);
       }
@@ -3608,44 +4044,97 @@ INDEX_HTML = """<!doctype html>
       if (!text) {
         return;
       }
+      const originalText = text;
+      const existingSessionId = state.activeSessionId;
+      const startedAt = performance.now();
+      let optimisticMessage = null;
+      reportClientMetric("prompt-submit-start", {
+        sessionId: existingSessionId || "",
+        draft: !existingSessionId,
+        textLength: text.length,
+      });
+      if (existingSessionId) {
+        optimisticMessage = addOptimisticMessageForSession(existingSessionId, text);
+        promptInput.value = "";
+        if (state.activeSessionDetail && state.activeSessionId === existingSessionId) {
+          renderSessionDetail(state.activeSessionDetail, true);
+        } else if (cachedSessionDetail(existingSessionId) || hasOptimisticMessagesForSession(existingSessionId)) {
+          renderSessionDetail(cachedSessionDetail(existingSessionId) || syntheticSessionDetail(existingSessionId), true);
+        }
+      } else if (state.draftSession) {
+        optimisticMessage = addDraftOptimisticMessage(text);
+        promptInput.value = "";
+        renderSessions();
+        renderDraftSession();
+      }
       promptInput.disabled = true;
       sendButton.disabled = true;
-      sendButton.textContent = "…";
-      sessionTitle.textContent = state.activeSessionId ? "Sending..." : "Starting chat...";
       try {
-        let sessionId = state.activeSessionId;
+        let sessionId = existingSessionId;
         if (!sessionId && state.draftSession) {
+          const draft = state.draftSession;
+          const createStartedAt = performance.now();
           const payload = await fetchJson("/api/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              cwd: state.draftSession.cwd,
-              templateSessionId: state.draftSession.templateSessionId,
+              cwd: draft.cwd,
+              templateSessionId: draft.templateSessionId,
               text,
             }),
           });
-          promptInput.value = "";
           await refreshSessionListOnly();
           sessionId = payload.session?.id || null;
           if (!sessionId) {
             throw new Error("New chat did not return a session id.");
           }
+          reportClientMetric("prompt-submit-ack", {
+            sessionId,
+            draft: true,
+            requestMs: roundedMs(performance.now() - createStartedAt),
+            totalMs: roundedMs(performance.now() - startedAt),
+          });
+          transferDraftOptimisticMessages(sessionId, draft);
           state.draftSession = null;
         } else {
+          const requestStartedAt = performance.now();
           await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text }),
           });
-          promptInput.value = "";
+          reportClientMetric("prompt-submit-ack", {
+            sessionId,
+            draft: false,
+            requestMs: roundedMs(performance.now() - requestStartedAt),
+            totalMs: roundedMs(performance.now() - startedAt),
+          });
         }
         await loadSession(sessionId);
       } catch (error) {
+        reportClientMetric("prompt-submit-error", {
+          sessionId: existingSessionId || "",
+          draft: !existingSessionId,
+          totalMs: roundedMs(performance.now() - startedAt),
+          message: error?.message || String(error),
+        });
+        if (existingSessionId) {
+          removeOptimisticMessageById(existingSessionId, optimisticMessage?.itemId || "");
+          if (state.activeSessionId === existingSessionId && (state.activeSessionDetail || cachedSessionDetail(existingSessionId))) {
+            renderSessionDetail(state.activeSessionDetail || cachedSessionDetail(existingSessionId), false);
+          }
+        } else {
+          removeDraftOptimisticMessage(optimisticMessage?.itemId || "");
+          if (state.draftSession) {
+            renderSessions();
+            renderDraftSession();
+          }
+        }
+        promptInput.value = originalText;
         sessionTitle.textContent = error.message || String(error);
       } finally {
         promptInput.disabled = false;
         sendButton.disabled = false;
-        sendButton.textContent = "↑";
       }
     }
 
@@ -3820,7 +4309,7 @@ INDEX_HTML = """<!doctype html>
     });
     reloadSessionButton.addEventListener("click", () => {
       if (state.activeSessionId) {
-        loadSession(state.activeSessionId);
+        loadSession(state.activeSessionId, { preserveVisibleTranscript: true });
       }
     });
     document.getElementById("composer").addEventListener("submit", sendPrompt);
@@ -3846,6 +4335,9 @@ INDEX_HTML = """<!doctype html>
       if (event.key === "Escape") {
         closeMobileSidebar();
       }
+    });
+    window.addEventListener("pagehide", () => {
+      flushClientMetrics(true);
     });
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
@@ -3885,6 +4377,9 @@ INDEX_HTML = """<!doctype html>
           firstStreamPaintLatencyMs: { ...state.firstStreamPaintLatencyMs },
           completionPaintLatencyMs: { ...state.completionPaintLatencyMs },
         };
+      },
+      flushUploads() {
+        return flushClientMetrics(false);
       },
       latestFirstStreamPaintLatency() {
         const values = Object.values(state.firstStreamPaintLatencyMs);
@@ -3990,6 +4485,120 @@ class PushSubscriptionStore:
     def _save(self, subscriptions: list[dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(subscriptions, indent=2), encoding="utf-8")
+
+
+class ClientMetricStore:
+    def __init__(self, *, maxlen: int = CLIENT_METRIC_BACKLOG_LIMIT) -> None:
+        self._entries: deque[dict[str, Any]] = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def add_many(self, entries: list[dict[str, Any]]) -> None:
+        timestamp = time.time()
+        with self._lock:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                self._entries.append(
+                    {
+                        "serverReceivedAt": timestamp,
+                        **entry,
+                    }
+                )
+
+    def recent(
+        self,
+        *,
+        limit: int,
+        kind: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            entries = list(self._entries)
+        if kind:
+            entries = [entry for entry in entries if entry.get("kind") == kind]
+        if session_id:
+            entries = [entry for entry in entries if entry.get("sessionId") == session_id]
+        if limit > 0:
+            entries = entries[-limit:]
+        return entries
+
+    def summary(
+        self,
+        *,
+        limit: int,
+        kind: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        entries = self.recent(limit=limit, kind=kind, session_id=session_id)
+        by_kind: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            entry_kind = entry.get("kind")
+            if isinstance(entry_kind, str) and entry_kind:
+                by_kind.setdefault(entry_kind, []).append(entry)
+        return {
+            "count": len(entries),
+            "kinds": sorted(by_kind),
+            "byKind": {
+                entry_kind: _summarize_metric_entries(group)
+                for entry_kind, group in sorted(by_kind.items())
+            },
+        }
+
+
+def _percentile(sorted_values: list[float], quantile: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    position = max(0.0, min(1.0, quantile)) * (len(sorted_values) - 1)
+    lower_index = int(position)
+    upper_index = min(len(sorted_values) - 1, lower_index + 1)
+    if lower_index == upper_index:
+        return float(sorted_values[lower_index])
+    fraction = position - lower_index
+    lower_value = float(sorted_values[lower_index])
+    upper_value = float(sorted_values[upper_index])
+    return lower_value + ((upper_value - lower_value) * fraction)
+
+
+def _round_metric(value: float) -> float:
+    return round(float(value), 1)
+
+
+def _summarize_metric_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    numeric_fields: dict[str, list[float]] = {}
+    bool_fields: dict[str, dict[str, int]] = {}
+    text_fields: dict[str, dict[str, int]] = {}
+    for entry in entries:
+        for key, value in entry.items():
+            if key in {"kind", "at", "serverReceivedAt"}:
+                continue
+            if isinstance(value, bool):
+                bucket = bool_fields.setdefault(key, {"true": 0, "false": 0})
+                bucket["true" if value else "false"] += 1
+                continue
+            if isinstance(value, (int, float)):
+                numeric_fields.setdefault(key, []).append(float(value))
+                continue
+            if isinstance(value, str) and value and key.endswith(("Status", "Code")):
+                bucket = text_fields.setdefault(key, {})
+                bucket[value] = bucket.get(value, 0) + 1
+    numeric_summary = {}
+    for key, values in numeric_fields.items():
+        ordered = sorted(values)
+        numeric_summary[key] = {
+            "count": len(values),
+            "avg": _round_metric(sum(values) / len(values)),
+            "p50": _round_metric(_percentile(ordered, 0.50)),
+            "p95": _round_metric(_percentile(ordered, 0.95)),
+            "max": _round_metric(max(values)),
+        }
+    return {
+        "count": len(entries),
+        "numeric": numeric_summary,
+        "boolean": bool_fields,
+        "text": text_fields,
+    }
 
 
 class PushNotifier:
@@ -4178,6 +4787,8 @@ class RedexHttpServer(ThreadingHTTPServer):
         super().__init__(server_address, RedexHandler)
         self.config = config
         self.push_subscription_store = PushSubscriptionStore(WEB_PUSH_SUBSCRIPTIONS_PATH)
+        self.client_metric_store = ClientMetricStore()
+        self.server_metric_store = ClientMetricStore()
         self.push_notifier = PushNotifier(config.app_server_url, self.push_subscription_store)
         self._session_list_cache: dict[tuple[int, bool, str | None, str | None], tuple[float, dict[str, Any]]] = {}
         self._session_list_cache_lock = threading.Lock()
@@ -4328,6 +4939,15 @@ class RedexHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/notifications":
             self._handle_notifications_status()
             return
+        if parsed.path == "/api/client-metrics":
+            self._handle_client_metrics_status(parsed.query)
+            return
+        if parsed.path == "/api/server-metrics":
+            self._handle_server_metrics_status(parsed.query)
+            return
+        if parsed.path == "/api/metrics/summary":
+            self._handle_metrics_summary(parsed.query)
+            return
         if parsed.path.startswith("/api/sessions/"):
             session_id = parsed.path.removeprefix("/api/sessions/")
             self._handle_get_session(session_id)
@@ -4349,6 +4969,9 @@ class RedexHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/notifications/unsubscribe":
             self._handle_notifications_unsubscribe()
+            return
+        if parsed.path == "/api/client-metrics":
+            self._handle_client_metrics_ingest()
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -4379,6 +5002,47 @@ class RedexHandler(BaseHTTPRequestHandler):
     def _handle_notifications_status(self) -> None:
         status = self.server.push_notifier.subscription_status()
         self._send_json(HTTPStatus.OK, status)
+
+    def _handle_client_metrics_status(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        limit = _first_int(query.get("limit"), default=100)
+        kind = _first(query.get("kind"))
+        session_id = _first(query.get("sessionId"))
+        metrics = self.server.client_metric_store.recent(limit=limit, kind=kind, session_id=session_id)
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "metrics": metrics,
+                "count": len(metrics),
+            },
+        )
+
+    def _handle_server_metrics_status(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        limit = _first_int(query.get("limit"), default=100)
+        kind = _first(query.get("kind"))
+        session_id = _first(query.get("sessionId"))
+        metrics = self.server.server_metric_store.recent(limit=limit, kind=kind, session_id=session_id)
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "metrics": metrics,
+                "count": len(metrics),
+            },
+        )
+
+    def _handle_metrics_summary(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        limit = _first_int(query.get("limit"), default=300)
+        kind = _first(query.get("kind"))
+        session_id = _first(query.get("sessionId"))
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "client": self.server.client_metric_store.summary(limit=limit, kind=kind, session_id=session_id),
+                "server": self.server.server_metric_store.summary(limit=limit, kind=kind, session_id=session_id),
+            },
+        )
 
     def _handle_manifest(self) -> None:
         body = MANIFEST_JSON.encode("utf-8")
@@ -4430,6 +5094,7 @@ class RedexHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle_list_sessions(self, raw_query: str) -> None:
+        started_at = time.perf_counter()
         query = parse_qs(raw_query)
         limit = _first_int(query.get("limit"), default=30)
         archived = _first_bool(query.get("archived"), default=False)
@@ -4439,17 +5104,58 @@ class RedexHandler(BaseHTTPRequestHandler):
             cwd = self.server.config.default_cwd
         cached = self.server.get_cached_session_list(limit=limit, archived=archived, search=search, cwd=cwd)
         if cached is not None:
-            self._send_json(HTTPStatus.OK, cached)
+            total_ms = round((time.perf_counter() - started_at) * 1000, 1)
+            session_count = len(cached.get("sessions", [])) if isinstance(cached.get("sessions"), list) else 0
+            self._record_server_metric(
+                "session-list",
+                totalMs=total_ms,
+                cacheHit=True,
+                sessionCount=session_count,
+                limit=limit,
+                archived=archived,
+                searchTerm=search or "",
+                sessionId="",
+            )
+            self._send_json(
+                HTTPStatus.OK,
+                cached,
+                extra_headers={
+                    "Server-Timing": f'redex;dur={total_ms}',
+                    "X-Redex-Cache": "hit",
+                },
+            )
             return
+        upstream_started_at = time.perf_counter()
         try:
             with self._client() as client:
                 result = client.list_sessions(limit=limit, cwd=cwd, archived=archived, search_term=search)
         except CodexAppServerError as exc:
             self._send_error_json(exc)
             return
+        upstream_ms = round((time.perf_counter() - upstream_started_at) * 1000, 1)
         payload = make_session_list_payload(result)
         self.server.put_cached_session_list(limit=limit, archived=archived, search=search, cwd=cwd, payload=payload)
-        self._send_json(HTTPStatus.OK, payload)
+        total_ms = round((time.perf_counter() - started_at) * 1000, 1)
+        session_count = len(payload.get("sessions", [])) if isinstance(payload.get("sessions"), list) else 0
+        self._record_server_metric(
+            "session-list",
+            totalMs=total_ms,
+            upstreamMs=upstream_ms,
+            cacheHit=False,
+            sessionCount=session_count,
+            limit=limit,
+            archived=archived,
+            searchTerm=search or "",
+            sessionId="",
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            payload,
+            extra_headers={
+                "Server-Timing": f'redex;dur={total_ms}',
+                "X-Redex-Cache": "miss",
+            },
+        )
 
     def _handle_git_preview(self, raw_query: str) -> None:
         query = parse_qs(raw_query)
@@ -4499,6 +5205,7 @@ class RedexHandler(BaseHTTPRequestHandler):
             return
 
     def _handle_get_session(self, session_id: str) -> None:
+        started_at = time.perf_counter()
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         cursor = _first(query.get("cursor"))
@@ -4514,9 +5221,27 @@ class RedexHandler(BaseHTTPRequestHandler):
         except CodexAppServerError as exc:
             self._send_error_json(exc)
             return
-        self._send_json(HTTPStatus.OK, result)
+        total_ms = round((time.perf_counter() - started_at) * 1000, 1)
+        message_count = len(result.get("messages", [])) if isinstance(result.get("messages"), list) else 0
+        self._record_server_metric(
+            "session-detail",
+            totalMs=total_ms,
+            sessionId=session_id,
+            limit=limit,
+            hasCursor=bool(cursor),
+            messageCount=message_count,
+        )
+        self._send_json(
+            HTTPStatus.OK,
+            result,
+            extra_headers={
+                "Server-Timing": f'redex;dur={total_ms}',
+                "X-Redex-Cache": "bypass",
+            },
+        )
 
     def _handle_create_session(self) -> None:
+        started_at = time.perf_counter()
         try:
             payload = self._read_json_body()
         except ValueError as exc:
@@ -4571,10 +5296,21 @@ class RedexHandler(BaseHTTPRequestHandler):
                 "turnId": turn_id,
                 "status": status,
             },
+            extra_headers={
+                "Server-Timing": f'redex;dur={round((time.perf_counter() - started_at) * 1000, 1)}',
+                "X-Redex-Cache": "bypass",
+            },
+        )
+        self._record_server_metric(
+            "create-session",
+            totalMs=round((time.perf_counter() - started_at) * 1000, 1),
+            sessionId=str(thread.get("id") or ""),
+            hadInitialText=bool(text is not None),
         )
         self.server.invalidate_session_list_cache()
 
     def _handle_send_prompt(self, session_id: str) -> None:
+        started_at = time.perf_counter()
         try:
             payload = self._read_json_body()
         except ValueError as exc:
@@ -4601,6 +5337,17 @@ class RedexHandler(BaseHTTPRequestHandler):
                 "turnId": turn_id,
                 "status": status,
             },
+            extra_headers={
+                "Server-Timing": f'redex;dur={round((time.perf_counter() - started_at) * 1000, 1)}',
+                "X-Redex-Cache": "bypass",
+            },
+        )
+        self._record_server_metric(
+            "send-prompt",
+            totalMs=round((time.perf_counter() - started_at) * 1000, 1),
+            sessionId=session_id,
+            textLength=len(text.strip()),
+            turnStatus=status or "",
         )
         self.server.invalidate_session_list_cache()
 
@@ -4634,6 +5381,36 @@ class RedexHandler(BaseHTTPRequestHandler):
         self.server.push_subscription_store.remove(endpoint)
         self._send_json(HTTPStatus.OK, self.server.push_notifier.subscription_status())
 
+    def _handle_client_metrics_ingest(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Body must include array field `entries`."})
+            return
+        sanitized: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            at = entry.get("at")
+            if not isinstance(kind, str) or not kind:
+                continue
+            if not isinstance(at, (int, float)):
+                continue
+            sanitized.append(
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if isinstance(key, str) and isinstance(value, (str, int, float, bool, type(None)))
+                }
+            )
+        self.server.client_metric_store.add_many(sanitized)
+        self._send_json(HTTPStatus.ACCEPTED, {"ok": True, "accepted": len(sanitized)})
+
     def _client(self) -> CodexAppServerClient:
         return CodexAppServerClient(self.server.config.app_server_url)
 
@@ -4660,6 +5437,14 @@ class RedexHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.SERVICE_UNAVAILABLE
         self._send_json(status, {"error": str(error)})
 
+    def _record_server_metric(self, kind: str, **data: Any) -> None:
+        entry = {
+            "kind": kind,
+            "at": time.time(),
+            **data,
+        }
+        self.server.server_metric_store.add_many([entry])
+
     def _write_sse_event(self, event: dict[str, Any]) -> None:
         event_id = event.get("id", 0)
         body = json.dumps(event, separators=(",", ":"))
@@ -4668,11 +5453,20 @@ class RedexHandler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {body}\n\n".encode("utf-8"))
         self.wfile.flush()
 
-    def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+    def _send_json(
+        self,
+        status: HTTPStatus,
+        payload: dict[str, Any],
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if extra_headers:
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
