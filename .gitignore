@@ -6,3 +6,6 @@ __pycache__/
 *.ts.net.crt
 *.ts.net.key
 tmp-redex-inline.js
+node_modules/
+playwright-report/
+test-results/

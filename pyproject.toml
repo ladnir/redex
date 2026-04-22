@@ -21,6 +21,11 @@ dependencies = [
 redex = "redex.cli:main"
 codex-shim = "codex_shim.cli:main"
 
+[project.optional-dependencies]
+test = [
+  "websockets>=15,<16",
+]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

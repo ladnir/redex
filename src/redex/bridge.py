@@ -36,6 +36,7 @@ EVENT_BACKLOG_LIMIT = 500
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 DEFAULT_TURN_PAGE_LIMIT = 40
 MAX_TURN_PAGE_LIMIT = 100
+DEFAULT_SESSION_LIST_CACHE_TTL = 1.0
 RUNTIME_DIR = Path.home() / ".codex" / "runtime"
 WEB_PUSH_CONFIG_PATH = RUNTIME_DIR / "redex-webpush-vapid.json"
 WEB_PUSH_SUBSCRIPTIONS_PATH = RUNTIME_DIR / "redex-webpush-subscriptions.json"
@@ -1604,6 +1605,7 @@ INDEX_HTML = """<!doctype html>
       lastRenderedSessionId: null,
       lastRenderedMetaKey: null,
       lastRenderedConversationKey: null,
+      lastRenderedSessionListKey: null,
       activeSessionRequestNonce: 0,
       sessionListRequestNonce: 0,
       activeSessionDetail: null,
@@ -1863,6 +1865,37 @@ INDEX_HTML = """<!doctype html>
         return allSessions;
       }
       return allSessions.slice(0, 4);
+    }
+
+    function sessionListRenderKey(groups) {
+      return JSON.stringify({
+        search: state.searchQuery || "",
+        activeSessionId: state.activeSessionId || "",
+        draftGroup: state.draftSession?.groupKey || "",
+        collapsedGroups: Object.keys(state.collapsedGroups).sort(),
+        expandedGroups: Object.keys(state.expandedGroups).sort(),
+        unseenSessionIds: Object.keys(state.unseenSessionIds).sort(),
+        groups: groups.map((group) => ({
+          key: group.key,
+          label: group.label,
+          subtitle: group.subtitle,
+          newest: group.newest,
+          totalSessions: group.sessions.length,
+          isCollapsed: !!state.collapsedGroups[group.key],
+          visibleSessions: (() => {
+            const baseVisibleSessions = sessionsForGroup(group);
+            const groupDraft = draftSessionForGroup(group.key);
+            const visibleGroupSessions = groupDraft ? [groupDraft, ...baseVisibleSessions] : baseVisibleSessions;
+            return visibleGroupSessions.map((session) => ({
+              id: session.id || "",
+              title: session.title || "",
+              preview: session.preview || "",
+              isDraft: !!session.isDraft,
+              unseen: !!(session.id && state.unseenSessionIds[session.id]),
+            }));
+          })(),
+        })),
+      });
     }
 
     function applyInlineMarkdown(text) {
@@ -2859,8 +2892,13 @@ INDEX_HTML = """<!doctype html>
     function renderSessions() {
       const groups = groupedSessions();
       updateSessionCount();
+      const nextSessionListKey = sessionListRenderKey(groups);
+      if (state.lastRenderedSessionListKey === nextSessionListKey) {
+        return;
+      }
       if (!groups.length) {
         sessionList.innerHTML = '<div class="empty empty-state">No sessions match this view yet.</div>';
+        state.lastRenderedSessionListKey = nextSessionListKey;
         return;
       }
       sessionList.innerHTML = groups.map((group) => {
@@ -2958,6 +2996,7 @@ INDEX_HTML = """<!doctype html>
           renderSessions();
         });
       }
+      state.lastRenderedSessionListKey = nextSessionListKey;
     }
 
     function renderConversation(detail, forceStick = false) {
@@ -3521,7 +3560,7 @@ INDEX_HTML = """<!doctype html>
           if (!document.hidden) {
             refreshSessionListOnly().catch(() => {});
           }
-        }, 2500);
+        }, 1000);
       }
     }
 
@@ -3900,12 +3939,16 @@ class RedexHttpServer(ThreadingHTTPServer):
         self.config = config
         self.push_subscription_store = PushSubscriptionStore(WEB_PUSH_SUBSCRIPTIONS_PATH)
         self.push_notifier = PushNotifier(config.app_server_url, self.push_subscription_store)
+        self._session_list_cache: dict[tuple[int, bool, str | None, str | None], tuple[float, dict[str, Any]]] = {}
+        self._session_list_cache_lock = threading.Lock()
         self.live_event_hub = LiveEventHub(
             config.app_server_url,
             notification_observer=self._observe_notification,
         )
 
     def _observe_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method.startswith(("thread/", "turn/", "item/")):
+            self.invalidate_session_list_cache()
         if method != "item/completed":
             return
         item = params.get("item")
@@ -3921,9 +3964,51 @@ class RedexHttpServer(ThreadingHTTPServer):
             return
         self.push_notifier.notify_final_response(thread_id, turn_id)
 
+    def get_cached_session_list(
+        self,
+        *,
+        limit: int,
+        archived: bool,
+        search: str | None,
+        cwd: str | None,
+    ) -> dict[str, Any] | None:
+        cache_key = (limit, archived, search, cwd)
+        with self._session_list_cache_lock:
+            cached = self._session_list_cache.get(cache_key)
+            if cached is None:
+                return None
+            created_at, payload = cached
+            if (time.monotonic() - created_at) > DEFAULT_SESSION_LIST_CACHE_TTL:
+                self._session_list_cache.pop(cache_key, None)
+                return None
+            return payload
+
+    def put_cached_session_list(
+        self,
+        *,
+        limit: int,
+        archived: bool,
+        search: str | None,
+        cwd: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        cache_key = (limit, archived, search, cwd)
+        with self._session_list_cache_lock:
+            self._session_list_cache[cache_key] = (time.monotonic(), payload)
+
+    def invalidate_session_list_cache(self) -> None:
+        with self._session_list_cache_lock:
+            self._session_list_cache.clear()
+
 
 class RedexHandler(BaseHTTPRequestHandler):
     server: RedexHttpServer
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError):
+            return
 
     def _read_session_detail_with_retry(
         self,
@@ -4112,13 +4197,19 @@ class RedexHandler(BaseHTTPRequestHandler):
         cwd = _first(query.get("cwd"))
         if cwd is None:
             cwd = self.server.config.default_cwd
+        cached = self.server.get_cached_session_list(limit=limit, archived=archived, search=search, cwd=cwd)
+        if cached is not None:
+            self._send_json(HTTPStatus.OK, cached)
+            return
         try:
             with self._client() as client:
                 result = client.list_sessions(limit=limit, cwd=cwd, archived=archived, search_term=search)
         except CodexAppServerError as exc:
             self._send_error_json(exc)
             return
-        self._send_json(HTTPStatus.OK, make_session_list_payload(result))
+        payload = make_session_list_payload(result)
+        self.server.put_cached_session_list(limit=limit, archived=archived, search=search, cwd=cwd, payload=payload)
+        self._send_json(HTTPStatus.OK, payload)
 
     def _handle_git_preview(self, raw_query: str) -> None:
         query = parse_qs(raw_query)
@@ -4164,7 +4255,7 @@ class RedexHandler(BaseHTTPRequestHandler):
                     continue
                 last_event_id = int(event["id"])
                 self._write_sse_event(event)
-        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             return
 
     def _handle_get_session(self, session_id: str) -> None:
@@ -4241,6 +4332,7 @@ class RedexHandler(BaseHTTPRequestHandler):
                 "status": status,
             },
         )
+        self.server.invalidate_session_list_cache()
 
     def _handle_send_prompt(self, session_id: str) -> None:
         try:
@@ -4270,6 +4362,7 @@ class RedexHandler(BaseHTTPRequestHandler):
                 "status": status,
             },
         )
+        self.server.invalidate_session_list_cache()
 
     def _handle_notifications_subscribe(self) -> None:
         try:

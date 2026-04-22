@@ -258,18 +258,49 @@ def normalize_thread(thread: dict[str, Any]) -> dict[str, Any]:
     status_type = status.get("type") if isinstance(status, dict) else status
     title = thread.get("name")
     preview = thread.get("preview")
-    cwd = thread.get("cwd")
+    return dict(
+        _normalize_thread_cached(
+            thread.get("id"),
+            title,
+            preview,
+            thread.get("cwd"),
+            thread.get("path"),
+            thread.get("source"),
+            thread.get("modelProvider"),
+            thread.get("createdAt"),
+            thread.get("updatedAt"),
+            status_type,
+            git_branch,
+        )
+    )
+
+
+@lru_cache(maxsize=4096)
+def _normalize_thread_cached(
+    thread_id: Any,
+    title: Any,
+    preview: Any,
+    cwd: Any,
+    path: Any,
+    source: Any,
+    model_provider: Any,
+    created_at: Any,
+    updated_at: Any,
+    status_type: Any,
+    git_branch: Any,
+) -> dict[str, Any]:
     workspace_group, workspace_group_label = _workspace_group_for_cwd(cwd if isinstance(cwd, str) else None)
+    resolved_preview = preview.strip() if isinstance(preview, str) else None
     return {
-        "id": thread.get("id"),
-        "title": title or preview or thread.get("id"),
-        "preview": preview.strip() if isinstance(preview, str) else None,
+        "id": thread_id,
+        "title": title or resolved_preview or thread_id,
+        "preview": resolved_preview,
         "cwd": cwd,
-        "path": thread.get("path"),
-        "source": thread.get("source"),
-        "modelProvider": thread.get("modelProvider"),
-        "createdAt": _epoch_seconds_to_iso(thread.get("createdAt")),
-        "updatedAt": _epoch_seconds_to_iso(thread.get("updatedAt")),
+        "path": path,
+        "source": source,
+        "modelProvider": model_provider,
+        "createdAt": _epoch_seconds_to_iso(created_at),
+        "updatedAt": _epoch_seconds_to_iso(updated_at),
         "status": status_type,
         "gitBranch": git_branch,
         "workspaceGroup": workspace_group,
